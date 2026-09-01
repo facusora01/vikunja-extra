@@ -307,7 +307,11 @@
             // tarjeta y contiene su avatar.
             var card = a.closest('.task');
             if (!card || card.querySelectorAll('a[href*="/tasks/"]').length > 1) card = a;
-            if (card.querySelector(':scope > .vkx-asig')) continue;
+            // Buscar en toda la tarjeta, no solo en los hijos directos: cuando
+            // hay fila de cabecera el contenedor queda anidado, y una guarda
+            // por hijo directo no lo encuentra y lo agrega de nuevo en cada
+            // pasada del observer.
+            if (card.querySelector('.vkx-asig[data-task="' + m[1] + '"]')) continue;
 
             card.classList.add('vkx-host');
             var cont = document.createElement('div');
@@ -443,6 +447,8 @@
     };
     pintarCfg();
 
+    var OPCIONES_OBS = { childList: true, subtree: true };
+
     function todo() { decorar(); decorarColumnas(); }
 
     // Al cambiar de proyecto hay que releer los asignados
@@ -459,7 +465,21 @@
 
     function arrancar() {
         document.body.appendChild(cfg);
-        new MutationObserver(todo).observe(document.body, { childList: true, subtree: true });
+        // El observer se desconecta mientras redecora: lo que pinta extra.js son
+        // cambios del DOM y volverian a dispararlo. El rAF junta la rafaga de
+        // mutaciones de un re-render de Vue en una sola pasada.
+        var obs = null, encolado = false;
+        function repasar() {
+            if (encolado) return;
+            encolado = true;
+            requestAnimationFrame(function () {
+                encolado = false;
+                obs.disconnect();
+                try { todo(); } finally { obs.observe(document.body, OPCIONES_OBS); }
+            });
+        }
+        obs = new MutationObserver(repasar);
+        obs.observe(document.body, OPCIONES_OBS);
         todo();
         revisarProyecto();
         setInterval(revisarProyecto, 1000);

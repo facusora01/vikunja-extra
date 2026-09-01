@@ -37,6 +37,7 @@ Vikunja 127.0.0.1:3456 ──► PostgreSQL 16
 | `install/install-extra.sh` | Pone nginx delante e inyecta `extra.js` |
 | `install/install-ws.sh` | Triggers en Postgres + servicio `vikunja-eventos` |
 | `migracion/` | Scripts de migración desde Linear (una sola vez, se conservan como referencia) |
+| `mcp/vikunja-mcp.js` | Servidor MCP para que Claude cree y modifique tickets — cada uno lo corre local con su token ([como configurarlo](mcp/README.md)) |
 
 ## Instalación
 
