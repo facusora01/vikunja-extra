@@ -13,6 +13,11 @@ const http = require('http');
 const { Client } = require('pg');
 const { WebSocketServer } = require('ws');
 
+// MCP por HTTP en /_extra/mcp: mismo proceso, cero RAM extra. Instalado queda
+// al lado de este archivo; en el repo vive en mcp/.
+let mcp;
+try { mcp = require('./vikunja-mcp.js'); } catch (e) { mcp = require('../mcp/vikunja-mcp.js'); }
+
 const PORT = parseInt(process.env.PUERTO || '3457', 10);
 const CANAL = 'vikunja_cambio';
 const VIKUNJA = process.env.VIKUNJA_URL || 'http://127.0.0.1:3456';
@@ -93,6 +98,10 @@ function reconectar() {
 
 // ---------- servidor ----------
 const server = http.createServer((req, res) => {
+    if (req.url === '/_extra/mcp' || req.url === '/mcp') {
+        mcp.manejarHttp(req, res);
+        return;
+    }
     if (req.url === '/salud') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, clientes: clientes.size, pg: !!pg }));

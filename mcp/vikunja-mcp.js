@@ -1,32 +1,43 @@
 #!/usr/bin/env node
 /* vikunja-mcp — expone los tickets de Vikunja como herramientas MCP.
  *
- * Cada persona lo corre en su maquina (stdio) con su propio token, asi las
- * acciones quedan a nombre de quien las pide y con sus permisos. El server
- * no se entera: esto es un cliente mas de la API REST.
+ * Funciona de dos maneras:
  *
- * Sin dependencias: el protocolo MCP sobre stdio es JSON-RPC 2.0 por linea.
+ *  - Ejecutado directo (node vikunja-mcp.js): servidor MCP por stdio, con el
+ *    token en VIKUNJA_TOKEN. Para uso personal en la propia maquina.
  *
- *   VIKUNJA_URL=https://sora-srv.tail97131d.ts.net:8443
- *   VIKUNJA_TOKEN=tk_...
+ *  - Como modulo (require): expone manejarHttp(req, res) para que
+ *    vikunja-eventos sirva MCP por HTTP en /_extra/mcp. Ahi el token viaja en
+ *    el header Authorization de cada request, asi que un solo proceso atiende
+ *    a todo el equipo y cada accion queda a nombre de quien la pidio.
+ *
+ * En ninguno de los dos casos hay dependencias: MCP es JSON-RPC 2.0, por linea
+ * en stdio y por POST en HTTP.
+ *
+ *   VIKUNJA_URL         donde esta la API (en el server: http://127.0.0.1:3456)
+ *   VIKUNJA_PUBLIC_URL  la URL que ve la gente, para armar los links
+ *   VIKUNJA_TOKEN       solo en modo stdio
  */
 'use strict';
 
-const URL_BASE = (process.env.VIKUNJA_URL || 'https://sora-srv.tail97131d.ts.net:8443').replace(/\/+$/, '');
-const TOKEN = process.env.VIKUNJA_TOKEN || '';
+const crypto = require('crypto');
+
+const URL_FUNNEL = 'https://sora-srv.tail97131d.ts.net:8443';
+const URL_BASE = (process.env.VIKUNJA_URL || URL_FUNNEL).replace(/\/+$/, '');
+const URL_PUBLICA = (process.env.VIKUNJA_PUBLIC_URL || (URL_BASE.includes('127.0.0.1') ? URL_FUNNEL : URL_BASE)).replace(/\/+$/, '');
 const TZ = 'America/Argentina/Buenos_Aires';
 const DESFASE = '-03:00';
 
-// Los errores van a stderr: stdout es del protocolo y cualquier ruido lo rompe.
+// Los errores van a stderr: en modo stdio, stdout es del protocolo.
 const log = (...a) => process.stderr.write(new Date().toISOString() + ' ' + a.join(' ') + '\n');
 
 // ---------- API de Vikunja ----------
 
-async function api(metodo, ruta, cuerpo) {
+async function api(token, metodo, ruta, cuerpo) {
     const r = await fetch(URL_BASE + '/api/v1' + ruta, {
         method: metodo,
         headers: {
-            Authorization: 'Bearer ' + TOKEN,
+            Authorization: 'Bearer ' + token,
             'Content-Type': 'application/json'
         },
         body: cuerpo === undefined ? undefined : JSON.stringify(cuerpo)
@@ -49,31 +60,36 @@ const qs = o => {
 };
 
 // ---------- cache corto ----------
-// Proyectos, vistas y columnas cambian poco; evita 3 llamadas por cada mover_tarea.
+// Proyectos, vistas y columnas cambian poco; evita 3 llamadas por cada
+// mover_tarea. Va por usuario (hash del token) porque cada uno ve proyectos
+// distintos, y con TTL corto para que un permiso nuevo no tarde en aparecer.
 const cache = new Map();
 const TTL = 60 * 1000;
+const MAX_CACHE = 500;
 
-async function cacheado(clave, fn) {
-    const v = cache.get(clave);
+async function cacheado(token, clave, fn) {
+    const k = crypto.createHash('sha1').update(token).digest('hex').slice(0, 12) + ':' + clave;
+    const v = cache.get(k);
     if (v && Date.now() - v.ts < TTL) return v.dato;
     const dato = await fn();
-    cache.set(clave, { dato, ts: Date.now() });
+    if (cache.size > MAX_CACHE) cache.clear();
+    cache.set(k, { dato, ts: Date.now() });
     return dato;
 }
 
 // ---------- helpers de dominio ----------
 
-const proyectos = () => cacheado('proyectos', () => api('GET', '/projects'));
+const proyectos = t => cacheado(t, 'proyectos', () => api(t, 'GET', '/projects'));
 
-async function proyectoDe(ref) {
+async function proyectoDe(t, ref) {
     if (typeof ref === 'number' || /^\d+$/.test(String(ref))) {
         const id = parseInt(ref, 10);
-        const p = (await proyectos()).find(x => x.id === id);
+        const p = (await proyectos(t)).find(x => x.id === id);
         if (p) return p;
-        return api('GET', '/projects/' + id);
+        return api(t, 'GET', '/projects/' + id);
     }
     const buscado = String(ref).trim().toLowerCase();
-    const lista = await proyectos();
+    const lista = await proyectos(t);
     const exacto = lista.find(p => p.title.toLowerCase() === buscado);
     if (exacto) return exacto;
     const parciales = lista.filter(p => p.title.toLowerCase().includes(buscado));
@@ -85,23 +101,23 @@ async function proyectoDe(ref) {
 }
 
 // La vista kanban es la que tiene las columnas que el equipo usa como estados.
-async function vistaKanban(projectId) {
-    return cacheado('vistas:' + projectId, async () => {
-        const vistas = await api('GET', '/projects/' + projectId + '/views');
+async function vistaKanban(t, projectId) {
+    return cacheado(t, 'vistas:' + projectId, async () => {
+        const vistas = await api(t, 'GET', '/projects/' + projectId + '/views');
         const k = (vistas || []).find(v => v.view_kind === 'kanban' || v.view_kind === 3);
         if (!k) throw new Error('El proyecto ' + projectId + ' no tiene vista kanban');
         return k;
     });
 }
 
-async function columnas(projectId) {
-    const vista = await vistaKanban(projectId);
-    const buckets = await api('GET', '/projects/' + projectId + '/views/' + vista.id + '/buckets' + qs({ per_page: 100 }));
+async function columnas(t, projectId) {
+    const vista = await vistaKanban(t, projectId);
+    const buckets = await api(t, 'GET', '/projects/' + projectId + '/views/' + vista.id + '/buckets' + qs({ per_page: 100 }));
     return { vista, buckets: buckets || [] };
 }
 
-async function columnaDe(projectId, nombre) {
-    const { vista, buckets } = await columnas(projectId);
+async function columnaDe(t, projectId, nombre) {
+    const { vista, buckets } = await columnas(t, projectId);
     const buscado = String(nombre).trim().toLowerCase();
     const b = buckets.find(x => x.title.toLowerCase() === buscado)
         || buckets.find(x => x.title.toLowerCase().includes(buscado));
@@ -109,12 +125,12 @@ async function columnaDe(projectId, nombre) {
     return { vista, bucket: b };
 }
 
-async function usuariosDe(projectId) {
-    return cacheado('usuarios:' + projectId, () => api('GET', '/projects/' + projectId + '/projectusers'));
+async function usuariosDe(t, projectId) {
+    return cacheado(t, 'usuarios:' + projectId, () => api(t, 'GET', '/projects/' + projectId + '/projectusers'));
 }
 
-async function usuarioDe(projectId, ref) {
-    const lista = await usuariosDe(projectId);
+async function usuarioDe(t, projectId, ref) {
+    const lista = await usuariosDe(t, projectId);
     const buscado = String(ref).trim().toLowerCase();
     const u = lista.find(x => x.username.toLowerCase() === buscado)
         || lista.find(x => (x.name || '').toLowerCase() === buscado)
@@ -152,7 +168,7 @@ function detallarTarea(t, comentarios) {
         'vence: ' + (t.due_date && !String(t.due_date).startsWith('0001') ? t.due_date : '-'),
         'asignados: ' + ((t.assignees || []).map(a => a.username).join(', ') || '-'),
         'etiquetas: ' + ((t.labels || []).map(x => x.title).join(', ') || '-'),
-        'url: ' + URL_BASE + '/tasks/' + t.id,
+        'url: ' + URL_PUBLICA + '/tasks/' + t.id,
         '',
         (t.description || '(sin descripcion)').replace(/<[^>]+>/g, '').trim()
     ];
@@ -167,14 +183,16 @@ function detallarTarea(t, comentarios) {
 }
 
 // ---------- herramientas ----------
+// run recibe (argumentos, token): el token viene del entorno en modo stdio y
+// del header Authorization en modo HTTP.
 
 const HERRAMIENTAS = [
     {
         name: 'listar_proyectos',
         description: 'Lista los proyectos de Vikunja visibles para el usuario, con su id.',
         inputSchema: { type: 'object', properties: {} },
-        run: async () => {
-            const l = await proyectos();
+        run: async (a, t) => {
+            const l = await proyectos(t);
             if (!l || !l.length) return 'No hay proyectos visibles con este token.';
             return l.map(p => p.id + ' - ' + p.title).join('\n');
         }
@@ -187,9 +205,9 @@ const HERRAMIENTAS = [
             properties: { proyecto: { type: 'string', description: 'Id o nombre del proyecto' } },
             required: ['proyecto']
         },
-        run: async a => {
-            const p = await proyectoDe(a.proyecto);
-            const { buckets } = await columnas(p.id);
+        run: async (a, t) => {
+            const p = await proyectoDe(t, a.proyecto);
+            const { buckets } = await columnas(t, p.id);
             return 'Columnas de "' + p.title + '":\n' + buckets.map(b => b.id + ' - ' + b.title).join('\n');
         }
     },
@@ -206,16 +224,16 @@ const HERRAMIENTAS = [
             },
             required: ['proyecto']
         },
-        run: async a => {
-            const p = await proyectoDe(a.proyecto);
-            const t = await api('GET', '/projects/' + p.id + '/tasks' + qs({
+        run: async (a, t) => {
+            const p = await proyectoDe(t, a.proyecto);
+            const tareas = await api(t, 'GET', '/projects/' + p.id + '/tasks' + qs({
                 filter: a.incluir_hechas ? undefined : 'done = false',
                 filter_timezone: TZ,
                 s: a.buscar,
                 per_page: a.limite || 50
             }));
-            if (!t || !t.length) return 'Sin tareas que coincidan en "' + p.title + '".';
-            return 'Tareas de "' + p.title + '" (' + t.length + '):\n' + t.map(resumirTarea).join('\n');
+            if (!tareas || !tareas.length) return 'Sin tareas que coincidan en "' + p.title + '".';
+            return 'Tareas de "' + p.title + '" (' + tareas.length + '):\n' + tareas.map(resumirTarea).join('\n');
         }
     },
     {
@@ -230,15 +248,15 @@ const HERRAMIENTAS = [
             },
             required: ['texto']
         },
-        run: async a => {
-            const t = await api('GET', '/tasks' + qs({
+        run: async (a, t) => {
+            const tareas = await api(t, 'GET', '/tasks' + qs({
                 s: a.texto,
                 filter: a.incluir_hechas ? undefined : 'done = false',
                 filter_timezone: TZ,
                 per_page: a.limite || 30
             }));
-            if (!t || !t.length) return 'Ninguna tarea coincide con "' + a.texto + '".';
-            return t.map(resumirTarea).join('\n');
+            if (!tareas || !tareas.length) return 'Ninguna tarea coincide con "' + a.texto + '".';
+            return tareas.map(resumirTarea).join('\n');
         }
     },
     {
@@ -252,13 +270,13 @@ const HERRAMIENTAS = [
             },
             required: ['id']
         },
-        run: async a => {
-            const t = await api('GET', '/tasks/' + a.id);
+        run: async (a, t) => {
+            const tarea = await api(t, 'GET', '/tasks/' + a.id);
             let c = null;
             if (a.con_comentarios !== false) {
-                try { c = await api('GET', '/tasks/' + a.id + '/comments'); } catch (e) { log('sin comentarios:', e.message); }
+                try { c = await api(t, 'GET', '/tasks/' + a.id + '/comments'); } catch (e) { log('sin comentarios:', e.message); }
             }
-            return detallarTarea(t, c);
+            return detallarTarea(tarea, c);
         }
     },
     {
@@ -277,30 +295,30 @@ const HERRAMIENTAS = [
             },
             required: ['proyecto', 'titulo']
         },
-        run: async a => {
-            const p = await proyectoDe(a.proyecto);
-            const t = await api('PUT', '/projects/' + p.id + '/tasks', {
+        run: async (a, t) => {
+            const p = await proyectoDe(t, a.proyecto);
+            const tarea = await api(t, 'PUT', '/projects/' + p.id + '/tasks', {
                 title: a.titulo,
                 description: a.descripcion || '',
                 priority: a.prioridad || 0,
                 due_date: fecha(a.vence)
             });
-            const hecho = ['Creada #' + t.id + ' "' + t.title + '" en "' + p.title + '"'];
+            const hecho = ['Creada #' + tarea.id + ' "' + tarea.title + '" en "' + p.title + '"'];
             for (const ref of a.asignar_a || []) {
                 try {
-                    const u = await usuarioDe(p.id, ref);
-                    await api('PUT', '/tasks/' + t.id + '/assignees', { user_id: u.id });
+                    const u = await usuarioDe(t, p.id, ref);
+                    await api(t, 'PUT', '/tasks/' + tarea.id + '/assignees', { user_id: u.id });
                     hecho.push('asignada a ' + u.username);
                 } catch (e) { hecho.push('NO pude asignar a ' + ref + ': ' + e.message); }
             }
             if (a.columna) {
                 try {
-                    const { vista, bucket } = await columnaDe(p.id, a.columna);
-                    await api('POST', '/projects/' + p.id + '/views/' + vista.id + '/buckets/' + bucket.id + '/tasks', { task_id: t.id });
+                    const { vista, bucket } = await columnaDe(t, p.id, a.columna);
+                    await api(t, 'POST', '/projects/' + p.id + '/views/' + vista.id + '/buckets/' + bucket.id + '/tasks', { task_id: tarea.id });
                     hecho.push('movida a "' + bucket.title + '"');
                 } catch (e) { hecho.push('NO pude moverla: ' + e.message); }
             }
-            hecho.push(URL_BASE + '/tasks/' + t.id);
+            hecho.push(URL_PUBLICA + '/tasks/' + tarea.id);
             return hecho.join('\n');
         }
     },
@@ -319,8 +337,8 @@ const HERRAMIENTAS = [
             },
             required: ['id']
         },
-        run: async a => {
-            const actual = await api('GET', '/tasks/' + a.id);
+        run: async (a, t) => {
+            const actual = await api(t, 'GET', '/tasks/' + a.id);
             const cambios = {};
             if (a.titulo !== undefined) cambios.title = a.titulo;
             if (a.descripcion !== undefined) cambios.description = a.descripcion;
@@ -329,8 +347,8 @@ const HERRAMIENTAS = [
             if (a.hecha !== undefined) cambios.done = a.hecha;
             if (!Object.keys(cambios).length) return 'No me pasaste ningun cambio para #' + a.id + '.';
             // La API espera la tarea completa: parto de la actual y encimo los cambios.
-            const t = await api('POST', '/tasks/' + a.id, Object.assign({}, actual, cambios));
-            return 'Actualizada #' + t.id + ': ' + Object.keys(cambios).join(', ') + '\n' + resumirTarea(t);
+            const tarea = await api(t, 'POST', '/tasks/' + a.id, Object.assign({}, actual, cambios));
+            return 'Actualizada #' + tarea.id + ': ' + Object.keys(cambios).join(', ') + '\n' + resumirTarea(tarea);
         }
     },
     {
@@ -344,11 +362,11 @@ const HERRAMIENTAS = [
             },
             required: ['id', 'columna']
         },
-        run: async a => {
-            const t = await api('GET', '/tasks/' + a.id);
-            const { vista, bucket } = await columnaDe(t.project_id, a.columna);
-            await api('POST', '/projects/' + t.project_id + '/views/' + vista.id + '/buckets/' + bucket.id + '/tasks', { task_id: t.id });
-            return '#' + t.id + ' "' + t.title + '" movida a "' + bucket.title + '".';
+        run: async (a, t) => {
+            const tarea = await api(t, 'GET', '/tasks/' + a.id);
+            const { vista, bucket } = await columnaDe(t, tarea.project_id, a.columna);
+            await api(t, 'POST', '/projects/' + tarea.project_id + '/views/' + vista.id + '/buckets/' + bucket.id + '/tasks', { task_id: tarea.id });
+            return '#' + tarea.id + ' "' + tarea.title + '" movida a "' + bucket.title + '".';
         }
     },
     {
@@ -363,21 +381,21 @@ const HERRAMIENTAS = [
             },
             required: ['id']
         },
-        run: async a => {
-            const t = await api('GET', '/tasks/' + a.id);
+        run: async (a, t) => {
+            const tarea = await api(t, 'GET', '/tasks/' + a.id);
             const hecho = [];
             for (const ref of a.agregar || []) {
-                const u = await usuarioDe(t.project_id, ref);
-                await api('PUT', '/tasks/' + t.id + '/assignees', { user_id: u.id });
+                const u = await usuarioDe(t, tarea.project_id, ref);
+                await api(t, 'PUT', '/tasks/' + tarea.id + '/assignees', { user_id: u.id });
                 hecho.push('+ ' + u.username);
             }
             for (const ref of a.sacar || []) {
-                const u = await usuarioDe(t.project_id, ref);
-                await api('DELETE', '/tasks/' + t.id + '/assignees/' + u.id);
+                const u = await usuarioDe(t, tarea.project_id, ref);
+                await api(t, 'DELETE', '/tasks/' + tarea.id + '/assignees/' + u.id);
                 hecho.push('- ' + u.username);
             }
-            if (!hecho.length) return 'Asignados actuales de #' + t.id + ': ' + ((t.assignees || []).map(x => x.username).join(', ') || 'nadie');
-            return '#' + t.id + ': ' + hecho.join(', ');
+            if (!hecho.length) return 'Asignados actuales de #' + tarea.id + ': ' + ((tarea.assignees || []).map(x => x.username).join(', ') || 'nadie');
+            return '#' + tarea.id + ': ' + hecho.join(', ');
         }
     },
     {
@@ -388,8 +406,8 @@ const HERRAMIENTAS = [
             properties: { id: { type: 'number' }, texto: { type: 'string' } },
             required: ['id', 'texto']
         },
-        run: async a => {
-            await api('PUT', '/tasks/' + a.id + '/comments', { comment: a.texto });
+        run: async (a, t) => {
+            await api(t, 'PUT', '/tasks/' + a.id + '/comments', { comment: a.texto });
             return 'Comentario agregado en #' + a.id + '.';
         }
     },
@@ -405,8 +423,8 @@ const HERRAMIENTAS = [
             },
             required: ['id']
         },
-        run: async a => {
-            const etiquetas = await cacheado('etiquetas', () => api('GET', '/labels' + qs({ per_page: 200 }))) || [];
+        run: async (a, t) => {
+            const etiquetas = await cacheado(t, 'etiquetas', () => api(t, 'GET', '/labels' + qs({ per_page: 200 }))) || [];
             const buscar = n => {
                 const b = String(n).trim().toLowerCase();
                 const l = etiquetas.find(x => x.title.toLowerCase() === b) || etiquetas.find(x => x.title.toLowerCase().includes(b));
@@ -416,12 +434,12 @@ const HERRAMIENTAS = [
             const hecho = [];
             for (const n of a.agregar || []) {
                 const l = buscar(n);
-                await api('PUT', '/tasks/' + a.id + '/labels', { label_id: l.id });
+                await api(t, 'PUT', '/tasks/' + a.id + '/labels', { label_id: l.id });
                 hecho.push('+ ' + l.title);
             }
             for (const n of a.sacar || []) {
                 const l = buscar(n);
-                await api('DELETE', '/tasks/' + a.id + '/labels/' + l.id);
+                await api(t, 'DELETE', '/tasks/' + a.id + '/labels/' + l.id);
                 hecho.push('- ' + l.title);
             }
             return hecho.length ? '#' + a.id + ': ' + hecho.join(', ') : 'Etiquetas disponibles: ' + etiquetas.map(x => x.title).join(', ');
@@ -431,14 +449,14 @@ const HERRAMIENTAS = [
         name: 'quien_soy',
         description: 'Muestra con que usuario de Vikunja esta operando este MCP. Sirve para verificar la config.',
         inputSchema: { type: 'object', properties: {} },
-        run: async () => {
+        run: async (a, t) => {
             try {
-                const u = await api('GET', '/user');
-                return 'Conectado a ' + URL_BASE + ' como ' + u.username + (u.name ? ' (' + u.name + ')' : '') + ', id ' + u.id + '.';
+                const u = await api(t, 'GET', '/user');
+                return 'Conectado a ' + URL_PUBLICA + ' como ' + u.username + (u.name ? ' (' + u.name + ')' : '') + ', id ' + u.id + '.';
             } catch (e) {
                 // Los API tokens de Vikunja no siempre alcanzan /user; con ver proyectos alcanza.
-                const l = await proyectos();
-                return 'Conectado a ' + URL_BASE + '. El token no lee /user, pero ve ' + l.length + ' proyectos.';
+                const l = await proyectos(t);
+                return 'Conectado a ' + URL_PUBLICA + '. El token no lee /user, pero ve ' + l.length + ' proyectos.';
             }
         }
     }
@@ -446,63 +464,120 @@ const HERRAMIENTAS = [
 
 const PORNOMBRE = new Map(HERRAMIENTAS.map(h => [h.name, h]));
 
-// ---------- MCP sobre stdio ----------
+// ---------- JSON-RPC (comun a los dos transportes) ----------
+// Devuelve el objeto de respuesta, o undefined si el mensaje era una
+// notificacion y no corresponde responder nada.
 
-function responder(id, resultado) {
-    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result: resultado }) + '\n');
-}
-
-function fallar(id, codigo, mensaje) {
-    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, error: { code: codigo, message: mensaje } }) + '\n');
-}
-
-async function atender(msg) {
-    const { id, method, params } = msg;
+async function atender(msg, token) {
+    const { id, method, params } = msg || {};
 
     if (method === 'initialize') {
-        return responder(id, {
-            protocolVersion: (params && params.protocolVersion) || '2024-11-05',
-            capabilities: { tools: {} },
-            serverInfo: { name: 'vikunja', version: '1.0.0' }
-        });
+        return {
+            jsonrpc: '2.0', id,
+            result: {
+                protocolVersion: (params && params.protocolVersion) || '2024-11-05',
+                capabilities: { tools: {} },
+                serverInfo: { name: 'vikunja', version: '2.0.0' }
+            }
+        };
     }
-    if (method && method.startsWith('notifications/')) return;
-    if (method === 'ping') return responder(id, {});
+    if (typeof method === 'string' && method.startsWith('notifications/')) return undefined;
+    if (method === 'ping') return { jsonrpc: '2.0', id, result: {} };
     if (method === 'tools/list') {
-        return responder(id, { tools: HERRAMIENTAS.map(h => ({ name: h.name, description: h.description, inputSchema: h.inputSchema })) });
+        return {
+            jsonrpc: '2.0', id,
+            result: { tools: HERRAMIENTAS.map(h => ({ name: h.name, description: h.description, inputSchema: h.inputSchema })) }
+        };
     }
     if (method === 'tools/call') {
         const h = PORNOMBRE.get(params && params.name);
-        if (!h) return fallar(id, -32602, 'No existe la herramienta ' + (params && params.name));
+        if (!h) return { jsonrpc: '2.0', id, error: { code: -32602, message: 'No existe la herramienta ' + (params && params.name) } };
         try {
-            const texto = await h.run((params && params.arguments) || {});
-            return responder(id, { content: [{ type: 'text', text: String(texto) }] });
+            const texto = await h.run((params && params.arguments) || {}, token);
+            return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: String(texto) }] } };
         } catch (e) {
             log('fallo ' + h.name + ':', e.message);
-            return responder(id, { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true });
+            return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true } };
         }
     }
-    if (id !== undefined) fallar(id, -32601, 'Metodo no soportado: ' + method);
+    if (id !== undefined) return { jsonrpc: '2.0', id, error: { code: -32601, message: 'Metodo no soportado: ' + method } };
+    return undefined;
 }
 
-let pendiente = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', trozo => {
-    pendiente += trozo;
-    let corte;
-    while ((corte = pendiente.indexOf('\n')) >= 0) {
-        const linea = pendiente.slice(0, corte).trim();
-        pendiente = pendiente.slice(corte + 1);
-        if (!linea) continue;
-        let msg;
-        try { msg = JSON.parse(linea); } catch (e) { log('linea invalida:', e.message); continue; }
-        Promise.resolve(atender(msg)).catch(e => log('error interno:', e.message));
+// ---------- transporte HTTP (streamable http, sin sesiones) ----------
+// Para montar en un http.Server existente. El token de Vikunja viene en el
+// Authorization de cada request; no se guarda nada del cliente entre llamadas.
+
+function manejarHttp(req, res) {
+    const json = (codigo, obj) => {
+        res.writeHead(codigo, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(obj));
+    };
+    if (req.method !== 'POST') {
+        res.writeHead(405, { Allow: 'POST' });
+        res.end();
+        return;
     }
-});
-process.stdin.on('end', () => process.exit(0));
-
-if (!TOKEN) {
-    log('ERROR: falta VIKUNJA_TOKEN. Sacalo de Ajustes > Tokens API en Vikunja.');
-    process.exit(1);
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!token) {
+        json(401, { jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Falta el token: header Authorization: Bearer tk_... (se crea en Vikunja, Ajustes > Tokens API)' } });
+        return;
+    }
+    let cuerpo = '';
+    let excedido = false;
+    req.on('data', d => {
+        cuerpo += d;
+        if (cuerpo.length > 256 * 1024) { excedido = true; req.destroy(); }
+    });
+    req.on('end', async () => {
+        if (excedido) return;
+        let msg;
+        try { msg = JSON.parse(cuerpo); } catch (e) {
+            json(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'JSON invalido' } });
+            return;
+        }
+        try {
+            const lote = Array.isArray(msg) ? msg : [msg];
+            const respuestas = [];
+            for (const m of lote) {
+                const r = await atender(m, token);
+                if (r) respuestas.push(r);
+            }
+            if (!respuestas.length) { res.writeHead(202); res.end(); return; }
+            json(200, Array.isArray(msg) ? respuestas : respuestas[0]);
+        } catch (e) {
+            log('error http:', e.message);
+            json(500, { jsonrpc: '2.0', id: null, error: { code: -32603, message: 'Error interno' } });
+        }
+    });
 }
-log('vikunja-mcp listo contra ' + URL_BASE);
+
+module.exports = { atender, manejarHttp, HERRAMIENTAS };
+
+// ---------- transporte stdio (solo si se ejecuta directo) ----------
+
+if (require.main === module) {
+    const TOKEN = process.env.VIKUNJA_TOKEN || '';
+    if (!TOKEN) {
+        log('ERROR: falta VIKUNJA_TOKEN. Sacalo de Ajustes > Tokens API en Vikunja.');
+        process.exit(1);
+    }
+    let pendiente = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', trozo => {
+        pendiente += trozo;
+        let corte;
+        while ((corte = pendiente.indexOf('\n')) >= 0) {
+            const linea = pendiente.slice(0, corte).trim();
+            pendiente = pendiente.slice(corte + 1);
+            if (!linea) continue;
+            let msg;
+            try { msg = JSON.parse(linea); } catch (e) { log('linea invalida:', e.message); continue; }
+            atender(msg, TOKEN)
+                .then(r => { if (r) process.stdout.write(JSON.stringify(r) + '\n'); })
+                .catch(e => log('error interno:', e.message));
+        }
+    });
+    process.stdin.on('end', () => process.exit(0));
+    log('vikunja-mcp (stdio) listo contra ' + URL_BASE);
+}

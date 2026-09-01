@@ -71,6 +71,7 @@ sudo -u postgres psql -d "${DB}" -qc "GRANT SELECT ON tasks TO ${ROL}"
 log "Servicio"
 install -d "${DIR}"
 install -m 644 "${FUENTE}/eventos.js" "${DIR}/eventos.js"
+install -m 644 "${FUENTE}/vikunja-mcp.js" "${DIR}/vikunja-mcp.js"
 cat > "${DIR}/package.json" <<'EOF'
 { "name": "vikunja-eventos", "version": "1.0.0", "private": true,
   "dependencies": { "pg": "^8.13.1", "ws": "^8.18.0" } }
@@ -95,6 +96,8 @@ User=vikunja
 Group=vikunja
 WorkingDirectory=${DIR}
 EnvironmentFile=${DIR}/entorno
+# El MCP habla con Vikunja por localhost, no da la vuelta por el Funnel
+Environment=VIKUNJA_URL=http://127.0.0.1:3456
 ExecStart=/usr/bin/node ${DIR}/eventos.js
 Restart=on-failure
 RestartSec=5
@@ -113,6 +116,18 @@ sleep 4
 systemctl is-active --quiet vikunja-eventos || { journalctl -u vikunja-eventos -n 25 --no-pager; exit 1; }
 curl -s http://127.0.0.1:3457/salud; echo
 
+log "nginx: ruta del MCP"
+if ! grep -q '_extra/mcp' /etc/nginx/sites-available/vikunja-extra; then
+    sed -i 's#    location /_extra/ {#    location = /_extra/mcp {
+        proxy_pass http://127.0.0.1:3457;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_read_timeout 300s;
+    }
+
+    location /_extra/ {#'         /etc/nginx/sites-available/vikunja-extra
+fi
+
 log "nginx: ruta del websocket"
 if ! grep -q '_extra/ws' /etc/nginx/sites-available/vikunja-extra; then
     sed -i 's#    location /_extra/ {#    location /_extra/ws {\n        proxy_pass http://127.0.0.1:3457;\n        proxy_http_version 1.1;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection "upgrade";\n        proxy_set_header Host $host;\n        proxy_read_timeout 3600s;\n    }\n\n    location /_extra/ {#' \
@@ -127,6 +142,7 @@ log "LISTO"
 echo "Servicio:  systemctl status vikunja-eventos"
 echo "Salud:     curl -s http://127.0.0.1:3457/salud"
 echo "Logs:      journalctl -u vikunja-eventos -f"
+echo "MCP:       curl -s -X POST https://sora-srv.tail97131d.ts.net:8443/_extra/mcp  (401 sin token = OK)"
 echo
 echo "PARA REVERTIR:"
 echo "  sudo systemctl disable --now vikunja-eventos"
