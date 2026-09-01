@@ -118,14 +118,20 @@ curl -s http://127.0.0.1:3457/salud; echo
 
 log "nginx: ruta del MCP"
 if ! grep -q '_extra/mcp' /etc/nginx/sites-available/vikunja-extra; then
-    sed -i 's#    location /_extra/ {#    location = /_extra/mcp {
-        proxy_pass http://127.0.0.1:3457;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_read_timeout 300s;
-    }
-
-    location /_extra/ {#'         /etc/nginx/sites-available/vikunja-extra
+    awk '
+        /^    location \/_extra\/ \{$/ && !hecho {
+            print "    location = /_extra/mcp {"
+            print "        proxy_pass http://127.0.0.1:3457;"
+            print "        proxy_http_version 1.1;"
+            print "        proxy_set_header Host $host;"
+            print "        proxy_read_timeout 300s;"
+            print "    }"
+            print ""
+            hecho = 1
+        }
+        { print }
+    ' /etc/nginx/sites-available/vikunja-extra > /etc/nginx/sites-available/vikunja-extra.nuevo
+    mv /etc/nginx/sites-available/vikunja-extra.nuevo /etc/nginx/sites-available/vikunja-extra
 fi
 
 log "nginx: ruta del websocket"
