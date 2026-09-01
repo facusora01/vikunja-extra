@@ -1,0 +1,10 @@
+# credenciales
+.env
+entorno
+*.key
+
+# datos de la migracion (contiene mails del equipo e ids internos)
+mapa.json
+migracion.log
+
+node_modules/
