@@ -34,11 +34,45 @@ claude mcp add vikunja --scope user \
 ```
 
 `--scope user` lo deja disponible en todos los proyectos de esa persona, no solo
-en uno. En Windows la ruta va igual pero con barras invertidas
-(`C:\Users\loquesea\vikunja-mcp.js`).
+en uno.
+
+**En Windows hay que correrlo desde Git Bash o cmd, no desde PowerShell**:
+PowerShell se come el `--` y el comando falla con
+`error: missing required argument 'commandOrUrl'`. El truco `--%` tampoco sirve
+porque `claude` es un script, no un ejecutable nativo.
 
 Verificar: abrir Claude y pedirle *"con que usuario de Vikunja estas conectado"*
 (usa `quien_soy`), o correr `claude mcp list`.
+
+## O sin comandos, con .mcp.json
+
+Otra via, si el equipo ya trabaja sobre un repo comun: dejar la config ahi, en
+un `.mcp.json` en la raiz, y que cada uno solo defina su token como variable de
+entorno. La config viaja con el repo y no hace falta que nadie corra
+`claude mcp add`.
+
+```json
+{
+  "mcpServers": {
+    "vikunja": {
+      "command": "node",
+      "args": ["../vikunja-extra/mcp/vikunja-mcp.js"],
+      "env": {
+        "VIKUNJA_URL": "https://sora-srv.tail97131d.ts.net:8443",
+        "VIKUNJA_TOKEN": "${VIKUNJA_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Cada uno define `VIKUNJA_TOKEN` en su entorno (`setx VIKUNJA_TOKEN tk_...` en
+Windows, el `.bashrc` o `.zshrc` en Linux y Mac) y clona este repo **al lado**
+del otro, porque la ruta del script es relativa. Claude pide aprobacion la
+primera vez que ve un `.mcp.json` nuevo. A quien no tenga la variable definida
+el MCP simplemente no le arranca; no rompe nada del repo.
+
+Asi esta puesto en el repo de CDF.
 
 ## Probar sin Claude
 
