@@ -111,7 +111,10 @@ MemoryMax=128M
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
+# enable --now no reinicia un servicio que ya esta activo: sin el restart, el
+# proceso viejo sigue corriendo con el eventos.js de antes.
 systemctl enable --now vikunja-eventos
+systemctl restart vikunja-eventos
 sleep 4
 systemctl is-active --quiet vikunja-eventos || { journalctl -u vikunja-eventos -n 25 --no-pager; exit 1; }
 curl -s http://127.0.0.1:3457/salud; echo
