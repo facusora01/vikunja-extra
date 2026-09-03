@@ -41,7 +41,7 @@ Vikunja 127.0.0.1:3456 ──► PostgreSQL 16
 | `install/setup-deploy.sh` | Habilita el deploy automático (se corre una vez, a mano) |
 | `.github/workflows/deploy.yml` | Deploy automático al pushear a `master` |
 | `migracion/` | Scripts de migración desde Linear (una sola vez, se conservan como referencia) |
-| `mcp/vikunja-mcp.js` | MCP para que Claude cree y modifique tickets; corre dentro de `vikunja-eventos` en `/_extra/mcp`, cada request con el token del que pide ([detalle](mcp/README.md)) |
+| `mcp/vikunja-mcp.js` | MCP para que Claude cree y modifique tickets, sus etiquetas y sus relaciones; corre dentro de `vikunja-eventos` en `/_extra/mcp`, cada request con el token del que pide ([detalle](mcp/README.md)) |
 
 ## Instalación
 
