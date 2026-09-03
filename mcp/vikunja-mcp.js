@@ -47,7 +47,9 @@ async function api(token, metodo, ruta, cuerpo) {
     try { datos = texto ? JSON.parse(texto) : null; } catch (e) { datos = texto; }
     if (!r.ok) {
         const msg = datos && datos.message ? datos.message : (typeof datos === 'string' ? datos.slice(0, 300) : r.statusText);
-        throw new Error(metodo + ' ' + ruta + ' -> ' + r.status + ': ' + msg);
+        const e = new Error(metodo + ' ' + ruta + ' -> ' + r.status + ': ' + msg);
+        e.status = r.status; // quien llama distingue un 403 de scope de un error real
+        throw e;
     }
     return datos;
 }
@@ -67,8 +69,11 @@ const cache = new Map();
 const TTL = 60 * 1000;
 const MAX_CACHE = 500;
 
+const claveCache = (token, clave) =>
+    crypto.createHash('sha1').update(token).digest('hex').slice(0, 12) + ':' + clave;
+
 async function cacheado(token, clave, fn) {
-    const k = crypto.createHash('sha1').update(token).digest('hex').slice(0, 12) + ':' + clave;
+    const k = claveCache(token, clave);
     const v = cache.get(k);
     if (v && Date.now() - v.ts < TTL) return v.dato;
     const dato = await fn();
@@ -76,6 +81,10 @@ async function cacheado(token, clave, fn) {
     cache.set(k, { dato, ts: Date.now() });
     return dato;
 }
+
+// Tras escribir hay que olvidar lo cacheado: si no, crear una etiqueta y
+// usarla enseguida fallaria con "no existe" hasta que venza el TTL.
+const olvidar = (token, clave) => cache.delete(claveCache(token, clave));
 
 // ---------- helpers de dominio ----------
 
@@ -138,6 +147,41 @@ async function usuarioDe(t, projectId, ref) {
     if (!u) throw new Error('No encontre a "' + ref + '" en el proyecto. Hay: ' + lista.map(x => x.username).join(', '));
     return u;
 }
+
+const etiquetas = t => cacheado(t, 'etiquetas', () => api(t, 'GET', '/labels' + qs({ per_page: 200 })));
+
+// Mismo criterio que proyectoDe: si el parcial es ambiguo conviene fallar
+// listando, no elegir el primero (con "bug" y "bugfix" acertar seria suerte).
+async function etiquetaDe(t, ref) {
+    const lista = (await etiquetas(t)) || [];
+    if (typeof ref === 'number' || /^\d+$/.test(String(ref))) {
+        const id = parseInt(ref, 10);
+        const l = lista.find(x => x.id === id);
+        if (l) return l;
+        throw new Error('No existe la etiqueta con id ' + id + '.');
+    }
+    const buscado = String(ref).trim().toLowerCase();
+    const exacto = lista.find(x => x.title.toLowerCase() === buscado);
+    if (exacto) return exacto;
+    const parciales = lista.filter(x => x.title.toLowerCase().includes(buscado));
+    if (parciales.length === 1) return parciales[0];
+    if (parciales.length > 1) {
+        throw new Error('"' + ref + '" coincide con varias etiquetas: ' + parciales.map(x => x.title + ' (' + x.id + ')').join(', '));
+    }
+    throw new Error('No existe la etiqueta "' + ref + '". Hay: ' + (lista.map(x => x.title).join(', ') || 'ninguna'));
+}
+
+// Los API tokens de Vikunja separan los permisos por recurso y metodo: uno
+// creado solo con "Labels > read all" lee pero no escribe, y el 403 pelado no
+// explica que falta.
+function conScopeLabels(e) {
+    if (e && e.status === 403) {
+        return new Error('El token no tiene permiso para escribir etiquetas. Regeneralo en Vikunja (Ajustes > Tokens API) marcando Labels completo, no solo "read all".');
+    }
+    return e;
+}
+
+const hex = c => String(c || '').trim().replace(/^#/, '');
 
 // Acepta "2026-09-05" (vence al final del dia) o un RFC3339 completo.
 function fecha(v) {
@@ -424,25 +468,117 @@ const HERRAMIENTAS = [
             required: ['id']
         },
         run: async (a, t) => {
-            const etiquetas = await cacheado(t, 'etiquetas', () => api(t, 'GET', '/labels' + qs({ per_page: 200 }))) || [];
-            const buscar = n => {
-                const b = String(n).trim().toLowerCase();
-                const l = etiquetas.find(x => x.title.toLowerCase() === b) || etiquetas.find(x => x.title.toLowerCase().includes(b));
-                if (!l) throw new Error('No existe la etiqueta "' + n + '". Hay: ' + etiquetas.map(x => x.title).join(', '));
-                return l;
-            };
             const hecho = [];
             for (const n of a.agregar || []) {
-                const l = buscar(n);
+                const l = await etiquetaDe(t, n);
                 await api(t, 'PUT', '/tasks/' + a.id + '/labels', { label_id: l.id });
                 hecho.push('+ ' + l.title);
             }
             for (const n of a.sacar || []) {
-                const l = buscar(n);
+                const l = await etiquetaDe(t, n);
                 await api(t, 'DELETE', '/tasks/' + a.id + '/labels/' + l.id);
                 hecho.push('- ' + l.title);
             }
-            return hecho.length ? '#' + a.id + ': ' + hecho.join(', ') : 'Etiquetas disponibles: ' + etiquetas.map(x => x.title).join(', ');
+            if (hecho.length) return '#' + a.id + ': ' + hecho.join(', ');
+            const l = (await etiquetas(t)) || [];
+            return 'Etiquetas disponibles: ' + (l.map(x => x.title).join(', ') || 'ninguna');
+        }
+    },
+    {
+        name: 'listar_etiquetas',
+        description: 'Lista las etiquetas que existen en Vikunja, con su id y color.',
+        inputSchema: { type: 'object', properties: {} },
+        run: async (a, t) => {
+            const l = (await etiquetas(t)) || [];
+            if (!l.length) return 'No hay etiquetas todavia.';
+            return l.map(x => x.id + ' - ' + x.title + (x.hex_color ? ' (#' + x.hex_color + ')' : '')).join('\n');
+        }
+    },
+    {
+        name: 'crear_etiqueta',
+        description: 'Crea una etiqueta nueva. Si ya existe una con ese titulo, devuelve la existente en vez de duplicarla.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                titulo: { type: 'string' },
+                color: { type: 'string', description: 'Hex, con o sin #, ej e74c3c' },
+                descripcion: { type: 'string' }
+            },
+            required: ['titulo']
+        },
+        run: async (a, t) => {
+            // Vikunja acepta dos etiquetas con el mismo nombre; un agente que
+            // reintenta terminaria llenando la lista de duplicados.
+            const buscado = String(a.titulo).trim().toLowerCase();
+            const ya = ((await etiquetas(t)) || []).find(x => x.title.toLowerCase() === buscado);
+            if (ya) return 'Ya existia la etiqueta "' + ya.title + '" (id ' + ya.id + '). No cree ninguna.';
+            let l;
+            try {
+                l = await api(t, 'PUT', '/labels', {
+                    title: String(a.titulo).trim(),
+                    hex_color: hex(a.color),
+                    description: a.descripcion || ''
+                });
+            } catch (e) { throw conScopeLabels(e); }
+            olvidar(t, 'etiquetas');
+            return 'Creada la etiqueta "' + l.title + '" (id ' + l.id + ')' + (l.hex_color ? ' color #' + l.hex_color : '') + '.';
+        }
+    },
+    {
+        name: 'modificar_etiqueta',
+        description: 'Cambia el titulo, el color o la descripcion de una etiqueta existente.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                etiqueta: { type: 'string', description: 'Id o nombre actual' },
+                titulo: { type: 'string' },
+                color: { type: 'string', description: 'Hex, con o sin #' },
+                descripcion: { type: 'string' }
+            },
+            required: ['etiqueta']
+        },
+        run: async (a, t) => {
+            const actual = await etiquetaDe(t, a.etiqueta);
+            const cambios = {};
+            if (a.titulo !== undefined) cambios.title = String(a.titulo).trim();
+            if (a.color !== undefined) cambios.hex_color = hex(a.color);
+            if (a.descripcion !== undefined) cambios.description = a.descripcion;
+            if (!Object.keys(cambios).length) return 'No me pasaste ningun cambio para "' + actual.title + '".';
+            let l;
+            // Como en modificar_tarea: la API espera el objeto completo.
+            try { l = await api(t, 'POST', '/labels/' + actual.id, Object.assign({}, actual, cambios)); }
+            catch (e) { throw conScopeLabels(e); }
+            olvidar(t, 'etiquetas');
+            return 'Actualizada la etiqueta ' + actual.id + ' (' + Object.keys(cambios).join(', ') + '): "'
+                + l.title + '"' + (l.hex_color ? ' #' + l.hex_color : '') + '.';
+        }
+    },
+    {
+        name: 'eliminar_etiqueta',
+        description: 'Borra una etiqueta de todo Vikunja. Sin "confirmar" no borra: informa cuantas tareas la usan. Para borrar de verdad hay que pasar en "confirmar" el titulo exacto.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                etiqueta: { type: 'string', description: 'Id o nombre' },
+                confirmar: { type: 'string', description: 'Repetir el titulo exacto de la etiqueta para confirmar el borrado' }
+            },
+            required: ['etiqueta']
+        },
+        run: async (a, t) => {
+            const l = await etiquetaDe(t, a.etiqueta);
+            if (String(a.confirmar || '').trim().toLowerCase() !== l.title.toLowerCase()) {
+                let cuantas = '?';
+                try {
+                    const usadas = await api(t, 'GET', '/tasks' + qs({ filter: 'labels in ' + l.id, filter_timezone: TZ, per_page: 100 }));
+                    cuantas = (usadas || []).length + ((usadas || []).length === 100 ? '+' : '');
+                } catch (e) { log('no pude contar tareas de la etiqueta:', e.message); }
+                return 'NO borre nada. La etiqueta "' + l.title + '" (id ' + l.id + ') esta en ' + cuantas
+                    + ' tarea(s); borrarla se la saca a todas. Si igual queres borrarla, volve a llamar con confirmar: "' + l.title + '".';
+            }
+            try { await api(t, 'DELETE', '/labels/' + l.id); }
+            catch (e) { throw conScopeLabels(e); }
+            olvidar(t, 'etiquetas');
+            return 'Borrada la etiqueta "' + l.title + '" (id ' + l.id + ').';
         }
     },
     {

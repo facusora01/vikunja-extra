@@ -1,7 +1,8 @@
 # vikunja-mcp
 
 MCP para que Claude pueda leer y modificar los tickets de Vikunja: crear,
-editar, mover de columna, asignar, comentar y etiquetar.
+editar, mover de columna, asignar, comentar, etiquetar y administrar las
+etiquetas del equipo.
 
 Corre **dentro de vikunja-eventos** en `sora-srv`, como una ruta HTTP mas
 (`/_extra/mcp`) del proceso que ya empuja los websockets — no suma proceso ni
@@ -18,8 +19,12 @@ Del lado de cada persona no se instala **nada**: ni Node, ni archivos, ni
    registro esta cerrado).
 2. Sacar un token: avatar → **Ajustes** → **Tokens API** → crear uno llamado
    `claude`, marcando **Tasks** (todo), **Projects → read all**,
-   **Labels → read all**. Se muestra una sola vez; es una credencial, no va al
+   **Labels** (todo). Se muestra una sola vez; es una credencial, no va al
    repo ni por chat grupal.
+
+   > Quien ya tenga un token viejo con **Labels → read all** solo puede leer
+   > etiquetas: crear, editar o borrar responden 403. Hay que regenerarlo con
+   > Labels completo. El MCP lo dice con todas las letras cuando pasa.
 3. Guardarlo como variable de entorno `VIKUNJA_TOKEN`:
    - Windows: `setx VIKUNJA_TOKEN tk_...` y reabrir la terminal
    - Linux/Mac: `export VIKUNJA_TOKEN=tk_...` en el `.bashrc` o `.zshrc`
@@ -56,10 +61,18 @@ donde sacar el token.
 | `asignar_tarea` | Agrega o saca asignados |
 | `comentar_tarea` | Deja un comentario |
 | `etiquetar_tarea` | Agrega o saca etiquetas existentes |
+| `listar_etiquetas` | Etiquetas que existen, con id y color |
+| `crear_etiqueta` | Crea una etiqueta (si el titulo ya existe devuelve la existente) |
+| `modificar_etiqueta` | Cambia titulo, color o descripcion |
+| `eliminar_etiqueta` | Borra una etiqueta, con doble confirmacion |
 | `quien_soy` | Con que cuenta esta operando |
 
-Borrar tareas no existe a proposito: es la unica accion irreversible del
-conjunto y se hace desde la interfaz.
+Borrar **tareas** no existe a proposito: perder una tarea es irreversible y se
+hace desde la interfaz. Borrar una **etiqueta** si esta, porque no pierde
+tareas — solo se la saca a las que la tenian — y se rehace creandola de nuevo.
+Aun asi pide doble confirmacion: la primera llamada no borra, responde cuantas
+tareas la usan y pide repetir el titulo exacto en `confirmar`. Sirve para
+limpiar duplicados (`bug` y `bugs`) sin que un agente borre de taquito.
 
 Proyectos, columnas, usuarios y etiquetas se pueden nombrar por texto
 (`"Backend"`, `"En progreso"`, `"facu"`), no hace falta saber los ids. Las
