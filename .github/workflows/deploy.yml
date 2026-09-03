@@ -1,0 +1,168 @@
+# Deploy automatico de la capa extra a sora-srv.
+#
+# QUE HACE
+#   Push a master que toque frontend/, server/, mcp/ o install/nginx/ ->
+#   copia el repo al staging del servidor y corre el script privilegiado que
+#   lo instala, recarga nginx y reinicia vikunja-eventos.
+#
+# POR QUE HAY UN PASO DE TAILSCALE
+#   sora-srv vive en la tailnet; un runner de GitHub no resuelve ese nombre ni
+#   llega al puerto 22. Es el mismo obstaculo que resolvio Hornerito en el repo
+#   de CDF: el runner se une a la tailnet con un OAuth client etiquetado para
+#   CI, hace lo suyo y se va.
+#
+# EN QUE SE DIFERENCIA DE HORNERITO
+#   Hornerito termina en verde cuando no puede hacer su trabajo, porque corre
+#   al lado de un PR y un rojo ahi diria "el codigo esta mal" cuando en realidad
+#   es "Vikunja no contesto". Aca es al reves: si el deploy no se aplico, el
+#   servidor quedo con codigo viejo y hay que enterarse. Configurado y fallando
+#   = rojo. La unica excepcion es el repo TODAVIA sin configurar, que avisa y
+#   termina en verde para no dejar el primer push en rojo sin motivo.
+#
+# CONFIGURACION QUE VIVE FUERA DEL REPO (una persona, una vez):
+#   - En el servidor: sudo ./install/setup-deploy.sh   (deja el staging, el
+#     script privilegiado y el permiso acotado) + la clave publica de CI en
+#     authorized_keys.
+#   - Secrets: DEPLOY_SSH_KEY, TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET.
+#   - Variables (opcionales): DEPLOY_HOST, DEPLOY_USER.
+#   - ACL de Tailscale: tag:ci -> sora-srv:22.
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "frontend/**"
+      - "server/**"
+      - "mcp/**"
+      - "install/nginx/**"
+      - ".github/workflows/deploy.yml"
+  # Para redesplegar sin cambios (por ejemplo despues de tocar el servidor).
+  workflow_dispatch:
+
+# Dos deploys pisandose dejarian el servidor en un estado indefinido.
+concurrency:
+  group: deploy-vikunja-extra
+  cancel-in-progress: false
+
+jobs:
+  desplegar:
+    name: Desplegar en sora-srv
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Los secrets se mapean a env porque el contexto `secrets` no se puede usar
+    # en un `if`, y `env` si.
+    env:
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST || 'sora-srv.tail97131d.ts.net' }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'sora' }}
+    steps:
+      - name: ¿Esta configurado el deploy?
+        id: config
+        run: |
+          if [ -n "$DEPLOY_SSH_KEY" ] && [ -n "$TS_OAUTH_CLIENT_ID" ] && [ -n "$TS_OAUTH_SECRET" ]; then
+            echo "listo=si" >> "$GITHUB_OUTPUT"
+          else
+            echo "listo=no" >> "$GITHUB_OUTPUT"
+            {
+              echo "### El deploy automatico todavia no esta configurado"
+              echo ""
+              echo "Faltan secrets del repositorio. Mientras tanto los cambios se aplican a mano:"
+              echo ""
+              echo '```'
+              echo "sudo ./install/setup-deploy.sh   # una vez, en sora-srv"
+              echo '```'
+              echo ""
+              echo "Ver la seccion **Deploy** del README para los secrets y la ACL de Tailscale."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.config.outputs.listo == 'si'
+
+      - name: Entrar a la tailnet
+        if: steps.config.outputs.listo == 'si'
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Preparar la clave de SSH
+        if: steps.config.outputs.listo == 'si'
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # accept-new confia en la huella la primera vez y la fija despues. El
+          # tramo runner->servidor ya va cifrado dentro de la tailnet, asi que
+          # el riesgo que queda es un servidor suplantado DENTRO de la tailnet.
+          cat > ~/.ssh/config <<EOF
+          Host destino
+              HostName ${DEPLOY_HOST}
+              User ${DEPLOY_USER}
+              IdentityFile ~/.ssh/id_deploy
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+              ConnectTimeout 20
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Copiar el repo al staging
+        if: steps.config.outputs.listo == 'si'
+        run: |
+          # tar sobre ssh en vez de rsync: el servidor no tiene rsync instalado
+          # y no hace falta sumarle una dependencia para copiar cuatro
+          # directorios. `--delete` a mano: se vacia el staging antes.
+          tar -czf - frontend server mcp install \
+            | ssh destino 'rm -rf /opt/vikunja-extra-staging/* && tar -xzf - -C /opt/vikunja-extra-staging'
+          ssh destino 'ls -la /opt/vikunja-extra-staging'
+
+      - name: Aplicar
+        if: steps.config.outputs.listo == 'si'
+        run: ssh destino "sudo /usr/local/sbin/vikunja-extra-aplicar ${GITHUB_SHA::12}"
+
+      - name: Verificar desde afuera
+        if: steps.config.outputs.listo == 'si'
+        run: |
+          # Se comprueba contra el Funnel, no contra localhost del servidor: es
+          # la url que usan las personas, y de paso valida que el vhost quedo
+          # publicado y que el certificado sigue bien.
+          URL="https://${DEPLOY_HOST}:8443"
+          if curl -sf "$URL/" | grep -q "/_extra/extra.js?v=${GITHUB_SHA::12}"; then
+            echo "OK: ${URL} sirve la version ${GITHUB_SHA::12}"
+          else
+            echo "El sitio no devuelve la version desplegada" >&2
+            exit 1
+          fi
+          curl -sf "$URL/api/v1/info" > /dev/null && echo "OK: la API de Vikunja responde"
+
+      - name: Resumen
+        if: steps.config.outputs.listo == 'si' && success()
+        run: |
+          {
+            echo "### Desplegado en \`${DEPLOY_HOST}\`"
+            echo ""
+            echo "- Version: \`${GITHUB_SHA::12}\`"
+            echo "- Los navegadores abiertos toman el \`extra.js\` nuevo al recargar."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Que hacer si esto fallo
+        if: steps.config.outputs.listo == 'si' && failure()
+        run: |
+          {
+            echo "### El deploy fallo"
+            echo ""
+            echo "\`aplicar.sh\` restaura la version anterior por su cuenta si nginx no valida"
+            echo "o si \`vikunja-eventos\` no queda sano, asi que lo mas probable es que el"
+            echo "servidor siga sirviendo la version de antes. Para confirmarlo:"
+            echo ""
+            echo '```'
+            echo "ssh sora-srv 'systemctl status vikunja-eventos; curl -s localhost:3457/salud'"
+            echo '```'
+            echo ""
+            echo "Los respaldos quedan en \`/var/backups/vikunja-extra/\` con la fecha."
+          } >> "$GITHUB_STEP_SUMMARY"

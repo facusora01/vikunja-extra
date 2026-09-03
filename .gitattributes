@@ -1,0 +1,7 @@
+# Los scripts y la config se ejecutan en Linux: un CRLF los rompe con un
+# "bash: \r: command not found" que no dice nada. Se fuerza LF sin importar
+# el autocrlf de quien clone desde Windows.
+*.sh   text eol=lf
+*.js   text eol=lf
+*.conf text eol=lf
+*.yml  text eol=lf
