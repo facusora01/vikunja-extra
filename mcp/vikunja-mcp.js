@@ -194,33 +194,82 @@ function fecha(v) {
 
 const PRIORIDADES = { 0: 'sin prioridad', 1: 'baja', 2: 'media', 3: 'alta', 4: 'urgente', 5: 'DEFCON1' };
 
+// Vikunja no manda null en las fechas sin valor: manda 0001-01-01T00:00:00Z.
+const vacia = f => !f || String(f).startsWith('0001');
+const dia = f => vacia(f) ? null : String(f).slice(0, 10);
+const momento = f => vacia(f) ? null : String(f).slice(0, 16).replace('T', ' ');
+const sinHtml = s => String(s || '').replace(/<[^>]+>/g, '').trim();
+
+// El equipo nombra las tareas como en Linear (BACK-42), no por id crudo.
+const nombreTarea = t => (t.identifier || '#' + t.id) + ' ' + t.title;
+
+// repeat_after viene en segundos.
+function repeticion(t) {
+    if (t.repeat_mode === 2) return 'repite: cada mes';
+    const s = t.repeat_after;
+    if (!s) return null;
+    const desde = t.repeat_mode === 1 ? ' (desde que se completa)' : '';
+    if (s % 86400 === 0) return 'repite: cada ' + (s / 86400) + ' dia(s)' + desde;
+    if (s % 3600 === 0) return 'repite: cada ' + (s / 3600) + ' hora(s)' + desde;
+    return 'repite: cada ' + s + 's' + desde;
+}
+
+// Corta las listas largas para no gastar tokens en algo que el agente no lee.
+function primeros(lista, n, f) {
+    const l = lista.slice(0, n).map(f);
+    if (lista.length > n) l.push('...y ' + (lista.length - n) + ' mas');
+    return l.join(', ');
+}
+
+// Una linea por tarea: la usan listar_tareas y buscar_tareas, donde cada campo
+// que se agregue se multiplica por 50. Solo lo que se mira de un vistazo.
 function resumirTarea(t) {
-    const partes = ['#' + t.id + ' ' + t.title];
+    const partes = [nombreTarea(t)];
     if (t.done) partes.push('[hecha]');
     if (t.priority) partes.push('prioridad: ' + (PRIORIDADES[t.priority] || t.priority));
-    if (t.due_date && !String(t.due_date).startsWith('0001')) partes.push('vence: ' + String(t.due_date).slice(0, 10));
+    if (t.percent_done) partes.push(Math.round(t.percent_done * 100) + '%');
+    if (dia(t.due_date)) partes.push('vence: ' + dia(t.due_date));
     if (t.assignees && t.assignees.length) partes.push('asignada a: ' + t.assignees.map(a => a.username).join(', '));
     if (t.labels && t.labels.length) partes.push('etiquetas: ' + t.labels.map(l => l.title).join(', '));
     return partes.join(' | ');
 }
 
-function detallarTarea(t, comentarios) {
+// Cada linea se arma con un array y se descarta si quedo vacia: una tarea
+// pelada sigue ocupando cuatro lineas, no doce de "-".
+// `extra` trae lo que el run tuvo que resolver aparte (por ahora, la columna).
+function detallarTarea(t, comentarios, extra) {
+    const e = extra || {};
+    const linea = (...partes) => partes.filter(Boolean).join(' | ') || null;
     const l = [
-        '#' + t.id + ' ' + t.title,
-        'proyecto: ' + t.project_id + ' | ' + (t.done ? 'HECHA' : 'pendiente'),
-        'prioridad: ' + (PRIORIDADES[t.priority || 0] || t.priority),
-        'vence: ' + (t.due_date && !String(t.due_date).startsWith('0001') ? t.due_date : '-'),
-        'asignados: ' + ((t.assignees || []).map(a => a.username).join(', ') || '-'),
-        'etiquetas: ' + ((t.labels || []).map(x => x.title).join(', ') || '-'),
+        nombreTarea(t) + (t.is_favorite ? ' *' : '') + (t.identifier ? ' (#' + t.id + ')' : ''),
+        linea('proyecto: ' + t.project_id,
+            t.done ? 'HECHA' : 'pendiente',
+            e.columna ? 'columna: ' + e.columna : null,
+            t.percent_done ? Math.round(t.percent_done * 100) + '%' : null),
+        linea('prioridad: ' + (PRIORIDADES[t.priority || 0] || t.priority),
+            momento(t.due_date) ? 'vence: ' + momento(t.due_date) : null,
+            momento(t.start_date) ? 'empieza: ' + momento(t.start_date) : null,
+            momento(t.end_date) ? 'termina: ' + momento(t.end_date) : null),
+        linea((t.labels || []).length ? 'etiquetas: ' + t.labels.map(x => x.title).join(', ') : null,
+            (t.assignees || []).length ? 'asignados: ' + t.assignees.map(a => a.username).join(', ') : null,
+            t.hex_color ? 'color: #' + t.hex_color : null),
+        linea(repeticion(t),
+            (t.reminders || []).length ? 'recordatorios: ' + primeros(t.reminders, 3, r => momento(r.reminder || r)) : null),
+        linea(t.created_by ? 'creada por ' + t.created_by.username + (dia(t.created) ? ' el ' + dia(t.created) : '') : null,
+            momento(t.updated) ? 'ultimo cambio ' + momento(t.updated) : null),
+        (t.attachments || []).length
+            ? 'adjuntos (' + t.attachments.length + '): ' + primeros(t.attachments, 5, x => (x.file && x.file.name) || 'sin nombre')
+                + (t.cover_image_attachment_id ? ' | tiene portada' : '')
+            : null,
         'url: ' + URL_PUBLICA + '/tasks/' + t.id,
         '',
-        (t.description || '(sin descripcion)').replace(/<[^>]+>/g, '').trim()
-    ];
+        sinHtml(t.description) || '(sin descripcion)'
+    ].filter(x => x !== null);
     if (comentarios && comentarios.length) {
         l.push('', '--- comentarios ---');
         for (const c of comentarios) {
             l.push('[' + (c.author ? c.author.username : '?') + ' ' + String(c.created).slice(0, 16) + '] '
-                + (c.comment || '').replace(/<[^>]+>/g, '').trim());
+                + sinHtml(c.comment));
         }
     }
     return l.join('\n');
@@ -310,7 +359,8 @@ const HERRAMIENTAS = [
             type: 'object',
             properties: {
                 id: { type: 'number', description: 'Id de la tarea' },
-                con_comentarios: { type: 'boolean', description: 'Traer los comentarios (default true)' }
+                con_comentarios: { type: 'boolean', description: 'Traer los comentarios (default true)' },
+                con_columna: { type: 'boolean', description: 'Resolver en que columna del kanban esta (default true)' }
             },
             required: ['id']
         },
@@ -320,7 +370,17 @@ const HERRAMIENTAS = [
             if (a.con_comentarios !== false) {
                 try { c = await api(t, 'GET', '/tasks/' + a.id + '/comments'); } catch (e) { log('sin comentarios:', e.message); }
             }
-            return detallarTarea(tarea, c);
+            // La tarea no dice en que columna esta: hay que buscarla en los
+            // buckets. Si falla se omite la linea, no se cae la lectura.
+            let columna = null;
+            if (a.con_columna !== false) {
+                try {
+                    const { buckets } = await columnas(t, tarea.project_id);
+                    const b = buckets.find(x => (x.tasks || []).some(y => y.id === tarea.id));
+                    if (b) columna = b.title;
+                } catch (e) { log('sin columna:', e.message); }
+            }
+            return detallarTarea(tarea, c, { columna });
         }
     },
     {
