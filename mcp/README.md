@@ -1,8 +1,8 @@
 # vikunja-mcp
 
 MCP para que Claude pueda leer y modificar los tickets de Vikunja: crear,
-editar, mover de columna, asignar, comentar, etiquetar y administrar las
-etiquetas del equipo.
+editar, mover de columna, asignar, comentar, etiquetar, relacionar tareas entre
+si y administrar las etiquetas del equipo.
 
 Corre **dentro de vikunja-eventos** en `sora-srv`, como una ruta HTTP mas
 (`/_extra/mcp`) del proceso que ya empuja los websockets — no suma proceso ni
@@ -61,6 +61,8 @@ donde sacar el token.
 | `asignar_tarea` | Agrega o saca asignados |
 | `comentar_tarea` | Deja un comentario |
 | `etiquetar_tarea` | Agrega o saca etiquetas existentes |
+| `relacionar_tareas` | Conecta dos tareas (bloqueos, subtareas, duplicados) |
+| `desrelacionar_tareas` | Saca el vinculo entre dos tareas |
 | `listar_etiquetas` | Etiquetas que existen, con id y color |
 | `crear_etiqueta` | Crea una etiqueta (si el titulo ya existe devuelve la existente) |
 | `modificar_etiqueta` | Cambia titulo, color o descripcion |
@@ -73,6 +75,12 @@ tareas — solo se la saca a las que la tenian — y se rehace creandola de nuev
 Aun asi pide doble confirmacion: la primera llamada no borra, responde cuantas
 tareas la usan y pide repetir el titulo exacto en `confirmar`. Sirve para
 limpiar duplicados (`bug` y `bugs`) sin que un agente borre de taquito.
+
+Las relaciones se nombran en castellano (`"bloquea a"`, `"bloqueada por"`,
+`"subtarea"`, `"tarea padre"`, `"relacionada"`, `"duplica"`, `"precede a"`,
+`"va despues de"`) y se leen desde la tarea que se pasa en `id`. Vikunja
+escribe sola la inversa en la otra tarea, y `ver_tarea` las muestra en las dos
+puntas sin costo extra: ya vienen en la tarea.
 
 Proyectos, columnas, usuarios y etiquetas se pueden nombrar por texto
 (`"Backend"`, `"En progreso"`, `"facu"`), no hace falta saber los ids. Las

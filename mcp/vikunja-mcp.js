@@ -183,6 +183,45 @@ function conScopeLabels(e) {
 
 const hex = c => String(c || '').trim().replace(/^#/, '');
 
+// Los 11 tipos de relacion de Vikunja, con el nombre que usa el equipo. El
+// kind se lee siempre desde la tarea que se consulta: blocking en A significa
+// que A bloquea a B, y Vikunja escribe sola la inversa (blocked) en B.
+const RELACIONES = {
+    subtask: 'subtareas', parenttask: 'tarea padre', related: 'relacionadas',
+    duplicateof: 'duplicado de', duplicates: 'duplica',
+    blocking: 'bloquea a', blocked: 'bloqueada por',
+    precedes: 'precede a', follows: 'va despues de',
+    copiedfrom: 'copiada de', copiedto: 'copiada a'
+};
+
+// Sinonimos de lo que puede escribir un agente. Las claves van sin acentos
+// porque la referencia se normaliza antes de buscar.
+const SINONIMOS = {
+    subtarea: 'subtask', subtareas: 'subtask', hija: 'subtask',
+    padre: 'parenttask', 'tarea padre': 'parenttask', madre: 'parenttask',
+    relacionada: 'related', relacionadas: 'related', relacion: 'related',
+    'duplicado de': 'duplicateof', 'duplicada de': 'duplicateof',
+    duplica: 'duplicates', duplicado: 'duplicates',
+    bloquea: 'blocking', 'bloquea a': 'blocking',
+    bloqueada: 'blocked', 'bloqueada por': 'blocked', 'bloqueado por': 'blocked',
+    precede: 'precedes', 'precede a': 'precedes', antes: 'precedes',
+    'va despues de': 'follows', despues: 'follows', sigue: 'follows',
+    'copiada de': 'copiedfrom', 'copiada a': 'copiedto'
+};
+
+// Igual que columnaDe o usuarioDe: si no coincide, el error lista las opciones
+// validas en vez de dejar que la API devuelva un 400 sin explicacion.
+function kindDe(ref) {
+    const n = String(ref || '').trim().toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if (RELACIONES[n]) return n;
+    if (SINONIMOS[n]) return SINONIMOS[n];
+    const porNombre = Object.keys(RELACIONES).find(k => RELACIONES[k] === n);
+    if (porNombre) return porNombre;
+    throw new Error('No conozco la relacion "' + ref + '". Podes usar: '
+        + Object.values(RELACIONES).join(', ') + '.');
+}
+
 // Acepta "2026-09-05" (vence al final del dia) o un RFC3339 completo.
 function fecha(v) {
     if (!v) return undefined;
@@ -234,6 +273,21 @@ function resumirTarea(t) {
     return partes.join(' | ');
 }
 
+// related_tasks ya viene en el GET de la tarea, asi que mostrar el grafo no
+// cuesta ninguna llamada extra. Marcar las hechas es lo que hace util un
+// "bloqueada por": lo que importa es si el bloqueo sigue en pie.
+function relacionesDe(t) {
+    const r = t.related_tasks || {};
+    const lineas = [];
+    for (const kind of Object.keys(RELACIONES)) {
+        const otras = r[kind] || [];
+        if (!otras.length) continue;
+        lineas.push('  ' + RELACIONES[kind] + ': '
+            + primeros(otras, 5, o => nombreTarea(o) + (o.done ? ' [hecha]' : '')));
+    }
+    return lineas.length ? 'relaciones:\n' + lineas.join('\n') : null;
+}
+
 // Cada linea se arma con un array y se descarta si quedo vacia: una tarea
 // pelada sigue ocupando cuatro lineas, no doce de "-".
 // `extra` trae lo que el run tuvo que resolver aparte (por ahora, la columna).
@@ -261,6 +315,7 @@ function detallarTarea(t, comentarios, extra) {
             ? 'adjuntos (' + t.attachments.length + '): ' + primeros(t.attachments, 5, x => (x.file && x.file.name) || 'sin nombre')
                 + (t.cover_image_attachment_id ? ' | tiene portada' : '')
             : null,
+        relacionesDe(t),
         'url: ' + URL_PUBLICA + '/tasks/' + t.id,
         '',
         sinHtml(t.description) || '(sin descripcion)'
@@ -542,6 +597,52 @@ const HERRAMIENTAS = [
             if (hecho.length) return '#' + a.id + ': ' + hecho.join(', ');
             const l = (await etiquetas(t)) || [];
             return 'Etiquetas disponibles: ' + (l.map(x => x.title).join(', ') || 'ninguna');
+        }
+    },
+    {
+        name: 'relacionar_tareas',
+        description: 'Conecta dos tareas: bloquea a, bloqueada por, subtareas, tarea padre, relacionadas, duplica, precede a, va despues de. La relacion se lee desde la tarea "id".',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: { type: 'number', description: 'Tarea desde la que se mira la relacion' },
+                relacion: { type: 'string', description: 'bloquea a | bloqueada por | subtarea | tarea padre | relacionada | duplica | duplicado de | precede a | va despues de' },
+                otra: { type: 'number', description: 'Id de la otra tarea' }
+            },
+            required: ['id', 'relacion', 'otra']
+        },
+        run: async (a, t) => {
+            // Validar antes de llamar: asi el error lista los tipos validos en
+            // vez de que la API conteste un 400 pelado.
+            const kind = kindDe(a.relacion);
+            if (a.id === a.otra) throw new Error('No puedo relacionar la tarea #' + a.id + ' consigo misma.');
+            const [uno, dos] = await Promise.all([
+                api(t, 'GET', '/tasks/' + a.id),
+                api(t, 'GET', '/tasks/' + a.otra)
+            ]);
+            // Vikunja escribe sola la relacion inversa en la otra tarea.
+            await api(t, 'PUT', '/tasks/' + a.id + '/relations', { other_task_id: a.otra, relation_kind: kind });
+            // Los nombres de RELACIONES son etiquetas de listado ("subtareas"),
+            // no verbos; para la confirmacion se lee mejor al reves.
+            return nombreTarea(dos) + ' quedo como "' + RELACIONES[kind] + '" de ' + nombreTarea(uno) + '.';
+        }
+    },
+    {
+        name: 'desrelacionar_tareas',
+        description: 'Saca una relacion entre dos tareas. No borra ninguna tarea, solo el vinculo.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: { type: 'number' },
+                relacion: { type: 'string', description: 'El mismo tipo con el que se creo, visto desde "id"' },
+                otra: { type: 'number' }
+            },
+            required: ['id', 'relacion', 'otra']
+        },
+        run: async (a, t) => {
+            const kind = kindDe(a.relacion);
+            await api(t, 'DELETE', '/tasks/' + a.id + '/relations/' + kind + '/' + a.otra);
+            return 'Saque la relacion "' + RELACIONES[kind] + '" entre #' + a.id + ' y #' + a.otra + '.';
         }
     },
     {
