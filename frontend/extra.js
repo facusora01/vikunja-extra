@@ -384,6 +384,44 @@
 
     function autoOn() { return localStorage.getItem(PREF) !== 'off'; }
     function marcarCambio() { propio = Date.now(); }
+    // ---------- 2.bis. marcar como propia cualquier escritura a la API ----------
+    //
+    // El guard de "cambio propio" solo cubria las acciones de este script. El
+    // drag&drop del kanban es codigo nativo de Vikunja (axios -> XHR), asi que
+    // movias una tarjeta, el NOTIFY volvia por el websocket como si fuera de
+    // otro, y alCambiar() disparaba location.reload(): uno se auto-recargaba.
+    // Se envuelven XHR y fetch para que toda escritura a /api/v1/ marque el
+    // cambio como propio. Se marca dos veces (al salir y al volver la
+    // respuesta) porque el NOTIFY llega recien despues del commit.
+    (function () {
+        var ESCRITURA = /^(PUT|POST|DELETE|PATCH)$/i;
+        function esApi(u) {
+            try { return String(u).indexOf("/api/v1/") > -1; } catch (e) { return false; }
+        }
+
+        var xhrOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function (metodo, url) {
+            if (ESCRITURA.test(metodo) && esApi(url)) {
+                marcarCambio();
+                this.addEventListener("loadend", marcarCambio);
+            }
+            return xhrOpen.apply(this, arguments);
+        };
+
+        var fetchOrig = window.fetch;
+        if (fetchOrig) {
+            window.fetch = function (entrada, init) {
+                var url = (entrada && entrada.url) || entrada;
+                var metodo = (init && init.method) || (entrada && entrada.method) || "GET";
+                var propia = ESCRITURA.test(metodo) && esApi(url);
+                if (propia) marcarCambio();
+                return fetchOrig.apply(this, arguments).then(function (r) {
+                    if (propia) marcarCambio();
+                    return r;
+                });
+            };
+        }
+    })();
 
     function mostrarAviso() {
         if (avisoVisible) return;
@@ -395,13 +433,45 @@
         document.body.appendChild(d);
     }
 
+    // Refresco suave: en vez de recargar el documento entero, se le pide al
+    // store de kanban que vuelva a traer los buckets. Es el mismo patron que
+    // usa Vikunja internamente cuando cambian los filtros de fecha:
+    // loadBucketsForProject(projectId, viewId, params).
+    // Depende de internals (__vue_app__ / pinia), asi que todo va envuelto en
+    // try y devuelve false si algo no esta: el llamador recarga como antes.
+    function refrescarSuave() {
+        try {
+            var raiz = document.querySelector("#app");
+            var app = raiz && raiz.__vue_app__;
+            if (!app) return false;
+            var g = app.config.globalProperties;
+            var pinia = g && g.$pinia;
+            var router = g && g.$router;
+            var kanban = pinia && pinia._s && pinia._s.get("kanban");
+            if (!kanban || !router || typeof kanban.loadBucketsForProject !== "function") return false;
+
+            // Solo aplica a la vista kanban: /projects/<id>/<viewId>
+            var m = location.pathname.match(/\/projects\/(\d+)\/(\d+)/);
+            if (!m) return false;
+
+            kanban.loadBucketsForProject(
+                parseInt(m[1], 10),
+                parseInt(m[2], 10),
+                router.currentRoute.value.query
+            );
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function alCambiar(pid) {
         var actual = proyectoActual();
         // Si el cambio es de otro proyecto, no molesta
         if (actual && pid && actual !== pid) return;
         // Un cambio propio de hace menos de 2s ya se ve en pantalla
         if (Date.now() - propio < 3000) return;
-        if (autoOn() && !ocupado()) location.reload();
+        if (autoOn() && !ocupado()) { if (!refrescarSuave()) location.reload(); }
         else mostrarAviso();
     }
 

@@ -5,7 +5,9 @@ set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "Correr con sudo"; exit 1; }
 
 DIR=/opt/vikunja-eventos
-FUENTE=/home/sora/migracion
+# Antes FUENTE=/home/sora/migracion, una ruta de la primera instalacion que
+# ya no existe en el repo. Ahora los archivos salen del propio checkout.
+RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB=vikunja
 ROL=vikunja_eventos
 
@@ -70,12 +72,11 @@ sudo -u postgres psql -d "${DB}" -qc "GRANT SELECT ON tasks TO ${ROL}"
 
 log "Servicio"
 install -d "${DIR}"
-install -m 644 "${FUENTE}/eventos.js" "${DIR}/eventos.js"
-install -m 644 "${FUENTE}/vikunja-mcp.js" "${DIR}/vikunja-mcp.js"
-cat > "${DIR}/package.json" <<'EOF'
-{ "name": "vikunja-eventos", "version": "1.0.0", "private": true,
-  "dependencies": { "pg": "^8.13.1", "ws": "^8.18.0" } }
-EOF
+install -m 644 "${RAIZ}/server/eventos.js"  "${DIR}/eventos.js"
+install -m 644 "${RAIZ}/mcp/vikunja-mcp.js" "${DIR}/vikunja-mcp.js"
+# El package.json se versiona en server/. Antes se escribia aca con un heredoc,
+# asi que las dependencias del servicio no figuraban en ningun archivo del repo.
+install -m 644 "${RAIZ}/server/package.json" "${DIR}/package.json"
 ( cd "${DIR}" && npm install --omit=dev --no-audit --no-fund >/dev/null 2>&1 )
 echo "  dependencias instaladas"
 
@@ -119,33 +120,13 @@ sleep 4
 systemctl is-active --quiet vikunja-eventos || { journalctl -u vikunja-eventos -n 25 --no-pager; exit 1; }
 curl -s http://127.0.0.1:3457/salud; echo
 
-log "nginx: ruta del MCP"
-if ! grep -q '_extra/mcp' /etc/nginx/sites-available/vikunja-extra; then
-    awk '
-        /^    location \/_extra\/ \{$/ && !hecho {
-            print "    location = /_extra/mcp {"
-            print "        proxy_pass http://127.0.0.1:3457;"
-            print "        proxy_http_version 1.1;"
-            print "        proxy_set_header Host $host;"
-            print "        proxy_read_timeout 300s;"
-            print "    }"
-            print ""
-            hecho = 1
-        }
-        { print }
-    ' /etc/nginx/sites-available/vikunja-extra > /etc/nginx/sites-available/vikunja-extra.nuevo
-    mv /etc/nginx/sites-available/vikunja-extra.nuevo /etc/nginx/sites-available/vikunja-extra
-fi
-
-log "nginx: ruta del websocket"
-if ! grep -q '_extra/ws' /etc/nginx/sites-available/vikunja-extra; then
-    sed -i 's#    location /_extra/ {#    location /_extra/ws {\n        proxy_pass http://127.0.0.1:3457;\n        proxy_http_version 1.1;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection "upgrade";\n        proxy_set_header Host $host;\n        proxy_read_timeout 3600s;\n    }\n\n    location /_extra/ {#' \
-        /etc/nginx/sites-available/vikunja-extra
-fi
-install -m 644 "${FUENTE}/extra.js" /var/www/vikunja-extra/extra.js
-sed -i "s/extra\.js?v=[0-9]*/extra.js?v=$(date +%s)/" /etc/nginx/sites-available/vikunja-extra
-nginx -t
-systemctl reload nginx
+# El vhost de nginx ya no se parchea desde aca. Antes este script le insertaba
+# los location de /_extra/ws y /_extra/mcp con awk y sed sobre el archivo que
+# habia escrito install-extra.sh, y el resultado completo solo existia en el
+# servidor: no habia forma de revisarlo en un diff. Ahora el vhost entero se
+# versiona en install/nginx/vikunja-extra.conf.
+log "Falta instalar el vhost"
+echo "  Correr ./install/install-extra.sh (instala nginx y el frontend)."
 
 log "LISTO"
 echo "Servicio:  systemctl status vikunja-eventos"

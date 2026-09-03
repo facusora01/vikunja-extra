@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Pone nginx delante de Vikunja para inyectar /_extra/extra.js en el HTML.
+# Instalacion inicial: para actualizar despues esta el deploy (ver README).
 # Reversible: ver el bloque "PARA REVERTIR" al final.
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "Correr con sudo"; exit 1; }
+
+# Antes esto apuntaba a /home/sora/migracion, una ruta que quedo de la primera
+# instalacion y que ya no existe en el repo. Ahora sale del propio checkout.
+RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VHOST=/etc/nginx/sites-available/vikunja-extra
 
 log() { echo -e "\n\033[1;32m==>\033[0m $*"; }
 
@@ -12,41 +18,7 @@ nginx -V 2>&1 | grep -q with-http_sub_module && echo "  sub_filter disponible" \
 
 log "Copiando el script"
 install -d /var/www/vikunja-extra
-install -m 644 /home/sora/migracion/extra.js /var/www/vikunja-extra/extra.js
-
-log "Configurando nginx en 127.0.0.1:8080"
-cat > /etc/nginx/sites-available/vikunja-extra <<'EOF'
-# Proxy delante de Vikunja que inyecta el script propio en el HTML.
-server {
-    listen 127.0.0.1:8080;
-    server_name _;
-
-    client_max_body_size 25m;
-
-    location /_extra/ {
-        alias /var/www/vikunja-extra/;
-        add_header Cache-Control "no-cache";
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:3456;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        # sub_filter no puede trabajar sobre respuestas comprimidas
-        proxy_set_header Accept-Encoding "";
-        proxy_read_timeout 300s;
-
-        sub_filter '</head>' '<script src="/_extra/extra.js?v=VERSION"></script></head>';
-        sub_filter_once on;
-    }
-}
-EOF
-sed -i "s/VERSION/$(date +%s)/" /etc/nginx/sites-available/vikunja-extra
+install -m 644 "${RAIZ}/frontend/extra.js" /var/www/vikunja-extra/extra.js
 
 # $connection_upgrade tiene que existir; se define una sola vez a nivel http
 if ! grep -rq 'map \$http_upgrade \$connection_upgrade' /etc/nginx/conf.d/ /etc/nginx/nginx.conf 2>/dev/null; then
@@ -55,7 +27,14 @@ map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 EOF
 fi
 
-ln -sf /etc/nginx/sites-available/vikunja-extra /etc/nginx/sites-enabled/vikunja-extra
+log "Configurando nginx en 127.0.0.1:8080"
+# El vhost completo vive en install/nginx/vikunja-extra.conf. Antes se escribia
+# aca con un heredoc y despues install-ws.sh le insertaba los location de /ws y
+# /mcp con awk y sed: la config entera solo existia en el servidor y no se
+# podia revisar en un diff.
+sed "s/__VERSION__/$(date +%s)/" "${RAIZ}/install/nginx/vikunja-extra.conf" > "$VHOST"
+chmod 644 "$VHOST"
+ln -sf "$VHOST" /etc/nginx/sites-enabled/vikunja-extra
 nginx -t
 systemctl reload nginx
 

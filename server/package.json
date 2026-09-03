@@ -1,0 +1,2 @@
+{ "name": "vikunja-eventos", "version": "1.0.0", "private": true,
+  "dependencies": { "pg": "^8.13.1", "ws": "^8.18.0" } }
