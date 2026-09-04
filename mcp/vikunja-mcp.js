@@ -337,12 +337,30 @@ function detallarTarea(t, comentarios, extra) {
 const HERRAMIENTAS = [
     {
         name: 'listar_proyectos',
-        description: 'Lista los proyectos de Vikunja visibles para el usuario, con su id.',
+        description: 'Lista los proyectos de Vikunja visibles para el usuario, con su id y su anidacion (subproyectos indentados bajo su padre).',
         inputSchema: { type: 'object', properties: {} },
         run: async (a, t) => {
             const l = await proyectos(t);
             if (!l || !l.length) return 'No hay proyectos visibles con este token.';
-            return l.map(p => p.id + ' - ' + p.title).join('\n');
+            const porId = new Map(l.map(p => [p.id, p]));
+            const hijosDe = new Map();
+            for (const p of l) {
+                const pid = p.parent_project_id;
+                const raiz = !pid || !porId.has(pid);
+                const clave = raiz ? 0 : pid;
+                if (!hijosDe.has(clave)) hijosDe.set(clave, []);
+                hijosDe.get(clave).push(p);
+            }
+            const lineas = [];
+            const recorrer = (clave, profundidad) => {
+                const hijos = hijosDe.get(clave) || [];
+                for (const p of hijos) {
+                    lineas.push('  '.repeat(profundidad) + p.id + ' - ' + p.title);
+                    recorrer(p.id, profundidad + 1);
+                }
+            };
+            recorrer(0, 0);
+            return lineas.join('\n');
         }
     },
     {
