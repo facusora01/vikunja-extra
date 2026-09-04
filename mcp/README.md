@@ -50,7 +50,7 @@ donde sacar el token.
 
 | Herramienta | Que hace |
 |---|---|
-| `listar_proyectos` | Proyectos visibles, con id |
+| `listar_proyectos` | Proyectos visibles, con id y anidacion (subproyectos indentados bajo su padre) |
 | `listar_columnas` | Columnas del kanban de un proyecto (el equipo las usa como estados) |
 | `listar_tareas` | Tareas de un proyecto, pendientes por defecto |
 | `buscar_tareas` | Busqueda por texto en todos los proyectos |
