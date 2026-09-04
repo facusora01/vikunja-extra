@@ -14,6 +14,7 @@
     var API = '/api/v1';
 
     var PREF = 'vkextra:autorefresh';
+    var PREF_LANES = 'vkextra:swimlanes';
 
     // ---------- utilidades ----------
 
@@ -274,6 +275,81 @@
             if (previo && (previo.tagName === 'svg' || previo.querySelector('svg'))) previo.style.display = 'none';
             el.insertAdjacentHTML('afterbegin', svg);
         }
+    }
+
+    // ---------- 3. swimlanes: datos ----------
+    //
+    // Para agrupar por etiqueta hace falta saber, de cada tarea, sus etiquetas
+    // y en que columna esta. Las dos cosas vienen juntas en los buckets de la
+    // vista: /projects/{p}/views/{v}/buckets devuelve cada columna con sus
+    // tareas adentro, y cada tarea con sus labels. Es una sola llamada, el
+    // mismo endpoint que ya usa el MCP para resolver la columna de una tarea.
+    //
+    // Del DOM no se pueden sacar: las etiquetas se pintan como chips sin nada
+    // que las identifique, y las tareas que quedaron fuera del scroll de una
+    // columna directamente no estan en la pagina.
+
+    var tablero = null;        // { viewId, columnas: [...], etiquetas: [...] }
+    var cargaTablero = null;
+
+    function vistaActual() {
+        var m = location.pathname.match(/\/projects\/(\d+)\/(\d+)/);
+        return m ? { pid: parseInt(m[1], 10), vid: parseInt(m[2], 10) } : null;
+    }
+
+    async function cargarTablero() {
+        var v = vistaActual();
+        if (!v) return null;
+        if (cargaTablero) return cargaTablero;
+        cargaTablero = (async function () {
+            try {
+                var bs = await api('/projects/' + v.pid + '/views/' + v.vid + '/buckets?per_page=100');
+                if (!Array.isArray(bs)) return null;
+                var etiquetas = {};
+                var columnas = bs.map(function (b) {
+                    var tareas = (b.tasks || []).map(function (t) {
+                        var ls = t.labels || [];
+                        ls.forEach(function (l) { etiquetas[l.id] = { id: l.id, title: l.title, hex_color: l.hex_color }; });
+                        // Los assignees vienen en el mismo payload: se aprovecha
+                        // para que las tarjetas se pinten sin esperar la otra carga.
+                        if (t.assignees) asignados[t.id] = t.assignees.map(function (u) { return u.username; });
+                        return {
+                            id: t.id, title: t.title, identifier: t.identifier, done: !!t.done,
+                            etiquetas: ls.map(function (l) { return l.id; })
+                        };
+                    });
+                    return { id: b.id, title: b.title, tareas: tareas };
+                });
+                var lista = Object.keys(etiquetas).map(function (k) { return etiquetas[k]; });
+                lista.sort(function (a, b) { return a.title.localeCompare(b.title); });
+                tablero = { pid: v.pid, viewId: v.vid, columnas: columnas, etiquetas: lista };
+                return tablero;
+            } catch (e) {
+                return null;   // se reintenta en el proximo ciclo
+            } finally {
+                cargaTablero = null;
+            }
+        })();
+        return cargaTablero;
+    }
+
+    // Las franjas: una por etiqueta usada, mas "sin etiqueta" al final. Una
+    // tarea con varias etiquetas aparece en todas las que le corresponden.
+    function franjas() {
+        if (!tablero) return [];
+        var f = tablero.etiquetas.map(function (l) {
+            return { clave: 'l' + l.id, titulo: l.title, color: l.hex_color, id: l.id };
+        });
+        f.push({ clave: 'sin', titulo: 'Sin etiqueta', color: null, id: null });
+        return f.filter(function (fr) {
+            return tablero.columnas.some(function (c) { return tareasDe(c, fr).length; });
+        });
+    }
+
+    function tareasDe(columna, franja) {
+        return columna.tareas.filter(function (t) {
+            return franja.id === null ? !t.etiquetas.length : t.etiquetas.indexOf(franja.id) > -1;
+        });
     }
 
     // Icono circular de persona (el mismo que usa Linear para "asignar")
