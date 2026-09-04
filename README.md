@@ -32,6 +32,7 @@ Vikunja 127.0.0.1:3456 ──► PostgreSQL 16
 | Ruta | Qué es |
 |---|---|
 | `frontend/extra.js` | Script inyectado: asignación rápida, avatares en la tarjeta, íconos de estado por columna, agrupado por etiqueta en el Kanban, cliente websocket |
+| `frontend/verificar-swimlanes.js` | Se pega en la consola del navegador para comprobar que el agrupado por etiqueta tiene lo que necesita (no se despliega) |
 | `server/eventos.js` | Servicio que escucha Postgres y empuja los cambios por websocket |
 | `install/install-vikunja.sh` | Instala Vikunja sobre el PostgreSQL existente, con systemd y backup diario |
 | `install/install-extra.sh` | Pone nginx delante e inyecta `extra.js` |
