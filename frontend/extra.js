@@ -112,6 +112,8 @@
         '.vkx-vacio{color:var(--grey-400,#b5b5b5);font-size:11px;padding:2px}',
         '.vkx-nota{font-size:12px;color:var(--grey-500,#8a8a8a);padding:8px 14px;display:flex;gap:6px;align-items:center}',
         '.kanban.vkx-oculto{display:none!important}',
+        '.vkx-menu{min-width:200px;max-height:70vh}',
+        '.vkx-menu b:not(:first-child){margin-top:4px;border-top:1px solid rgba(128,128,128,.18);padding-top:7px}',
         '.vkx-ico{vertical-align:-2px;margin-right:6px;flex:none}'
     ].join('');
     document.head.appendChild(css);
@@ -337,6 +339,7 @@
                         if (t.assignees) asignados[t.id] = t.assignees.map(function (u) { return u.username; });
                         return {
                             id: t.id, title: t.title, identifier: t.identifier, done: !!t.done,
+                            prioridad: t.priority || 0,
                             etiquetas: ls.map(function (l) { return l.id; })
                         };
                     });
@@ -747,6 +750,146 @@
             quitarLanes();
         }
     }
+
+    // ---------- 3e. swimlanes: menu del click derecho ----------
+    //
+    // Reemplaza al arrastre, que en las franjas no se puede sostener (ver
+    // arriba). Va contra la API, asi que no depende de nada de Vue, y de paso
+    // llega a cosas que el drag&drop no hacia: prioridad, asignar, marcar
+    // hecha. El cambio se pinta al instante y se revierte si el server lo
+    // rechaza, igual que la asignacion rapida de las tarjetas.
+
+    var PRIORIDADES = ['Sin prioridad', 'Baja', 'Media', 'Alta', 'Urgente', 'DEFCON 1'];
+
+    function cerrarMenu() {
+        var m = document.querySelector('.vkx-menu');
+        if (m) m.remove();
+    }
+
+    // Relee el tablero y repinta. Se usa despues de cada cambio.
+    function refrescarLanes() {
+        tablero = null;
+        return cargarTablero().then(function () { todo(); });
+    }
+
+    function itemMenu(menu, texto, marcado, fn) {
+        var b = document.createElement('button');
+        var dot = document.createElement('span');
+        dot.className = 'vkx-dot' + (marcado ? ' vkx-yes' : '');
+        b.appendChild(dot);
+        b.appendChild(document.createTextNode(texto));
+        b.onclick = function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            cerrarMenu();
+            fn();
+        };
+        menu.appendChild(b);
+        return b;
+    }
+
+    function titMenu(menu, texto) {
+        var t = document.createElement('b');
+        t.textContent = texto;
+        menu.appendChild(t);
+    }
+
+    // Envuelve una escritura: marca el cambio como propio (para que el
+    // websocket no dispare una recarga encima), repinta y avisa si fallo.
+    function accion(promesa) {
+        marcarCambio();
+        promesa.then(function () {
+            marcarCambio();
+            refrescarLanes();
+        }).catch(function (e) {
+            alert('No se pudo: ' + e.message);
+            refrescarLanes();
+        });
+    }
+
+    function abrirMenu(x, y, tarea) {
+        cerrarMenu();
+        var menu = document.createElement('div');
+        menu.className = 'vkx-pop vkx-menu';
+        document.body.appendChild(menu);
+
+        titMenu(menu, (tarea.identifier || '#' + tarea.id));
+
+        // Mover de columna: lo que antes se hacia arrastrando.
+        titMenu(menu, 'Mover a');
+        tablero.columnas.forEach(function (c) {
+            var esta = c.tareas.some(function (t) { return t.id === tarea.id; });
+            itemMenu(menu, c.title, esta, function () {
+                if (esta) return;
+                accion(api('/projects/' + tablero.pid + '/views/' + tablero.viewId
+                    + '/buckets/' + c.id + '/tasks', 'POST', { task_id: tarea.id }));
+            });
+        });
+
+        titMenu(menu, 'Prioridad');
+        PRIORIDADES.forEach(function (nombre, i) {
+            itemMenu(menu, nombre, tarea.prioridad === i, function () {
+                // La API espera la tarea entera: se parte de la actual.
+                accion(api('/tasks/' + tarea.id).then(function (actual) {
+                    actual.priority = i;
+                    return api('/tasks/' + tarea.id, 'POST', actual);
+                }));
+            });
+        });
+
+        titMenu(menu, 'Estado');
+        itemMenu(menu, tarea.done ? 'Reabrir' : 'Marcar como hecha', false, function () {
+            accion(api('/tasks/' + tarea.id).then(function (actual) {
+                actual.done = !tarea.done;
+                return api('/tasks/' + tarea.id, 'POST', actual);
+            }));
+        });
+        itemMenu(menu, 'Abrir la tarea', false, function () {
+            if (!irA('/tasks/' + tarea.id)) location.href = '/tasks/' + tarea.id;
+        });
+
+        // Asignar: la gente del proyecto ya esta cacheada por la otra funcion.
+        usuariosDe(tablero.pid).then(function (users) {
+            if (!document.body.contains(menu)) return;
+            titMenu(menu, 'Asignar a');
+            var tiene = asignados[tarea.id] || [];
+            users.forEach(function (u) {
+                itemMenu(menu, u.name || u.username, tiene.indexOf(u.username) > -1, function () {
+                    var ya = (asignados[tarea.id] || []).indexOf(u.username) > -1;
+                    accion(ya
+                        ? api('/tasks/' + tarea.id + '/assignees/' + u.id, 'DELETE')
+                        : api('/tasks/' + tarea.id + '/assignees', 'PUT', { user_id: u.id }));
+                });
+            });
+            ubicarMenu(menu, x, y);
+        }).catch(function () { });
+
+        ubicarMenu(menu, x, y);
+    }
+
+    // Se ubica despues de llenarlo, para no salirse de la pantalla.
+    function ubicarMenu(menu, x, y) {
+        var alto = menu.offsetHeight || 260;
+        var ancho = menu.offsetWidth || 200;
+        menu.style.top = Math.max(8, Math.min(y, window.innerHeight - alto - 8)) + 'px';
+        menu.style.left = Math.max(8, Math.min(x, window.innerWidth - ancho - 8)) + 'px';
+    }
+
+    document.addEventListener('contextmenu', function (ev) {
+        var chip = ev.target.closest && ev.target.closest('.vkx-chip');
+        if (!chip || !tablero) return;
+        ev.preventDefault();
+        var id = parseInt(chip.dataset.task, 10);
+        var tarea = null;
+        tablero.columnas.forEach(function (c) {
+            c.tareas.forEach(function (t) { if (t.id === id) tarea = t; });
+        });
+        if (tarea) abrirMenu(ev.clientX, ev.clientY, tarea);
+    });
+
+    document.addEventListener('click', function (ev) {
+        if (!ev.target.closest('.vkx-menu')) cerrarMenu();
+    });
 
     // ---------- arranque ----------
 
