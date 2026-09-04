@@ -575,8 +575,13 @@
         if (actual && pid && actual !== pid) return;
         // Un cambio propio de hace menos de 2s ya se ve en pantalla
         if (Date.now() - propio < 3000) return;
-        if (autoOn() && !ocupado()) { if (!refrescarSuave()) location.reload(); }
-        else mostrarAviso();
+        // Con las franjas prendidas el tablero que se ve es el propio, asi
+        // que hay que releerlo: refrescarSuave() solo recarga el de Vue, que
+        // esta escondido.
+        if (autoOn() && !ocupado()) {
+            if (lanesOn() && lanesCont) refrescarLanes();
+            else if (!refrescarSuave()) location.reload();
+        } else mostrarAviso();
     }
 
     function conectar() {
