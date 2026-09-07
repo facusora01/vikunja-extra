@@ -239,8 +239,12 @@ const dia = f => vacia(f) ? null : String(f).slice(0, 10);
 const momento = f => vacia(f) ? null : String(f).slice(0, 16).replace('T', ' ');
 const sinHtml = s => String(s || '').replace(/<[^>]+>/g, '').trim();
 
-// El equipo nombra las tareas como en Linear (BACK-42), no por id crudo.
-const nombreTarea = t => (t.identifier || '#' + t.id) + ' ' + t.title;
+// El equipo nombra las tareas como en Linear (BACK-42), no por id crudo, pero
+// ese codigo (y el "#N" que listar_tareas/buscar_tareas devuelven cuando no
+// hay codigo) es un indice por proyecto: se repite entre proyectos y no alcanza
+// para llamar a ver_tarea, que pide el id global de la URL /tasks/N. Por eso
+// siempre se agrega "(id:N)" ademas del nombre visible.
+const nombreTarea = t => (t.identifier || '#' + t.id) + ' (id:' + t.id + ') ' + t.title;
 
 // repeat_after viene en segundos.
 function repeticion(t) {
@@ -295,7 +299,7 @@ function detallarTarea(t, comentarios, extra) {
     const e = extra || {};
     const linea = (...partes) => partes.filter(Boolean).join(' | ') || null;
     const l = [
-        nombreTarea(t) + (t.is_favorite ? ' *' : '') + (t.identifier ? ' (#' + t.id + ')' : ''),
+        nombreTarea(t) + (t.is_favorite ? ' *' : ''),
         linea('proyecto: ' + t.project_id,
             t.done ? 'HECHA' : 'pendiente',
             e.columna ? 'columna: ' + e.columna : null,
