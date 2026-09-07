@@ -14,6 +14,7 @@
     var API = '/api/v1';
 
     var PREF = 'vkextra:autorefresh';
+    var PREF_LANES = 'vkextra:swimlanes';
 
     // ---------- utilidades ----------
 
@@ -89,6 +90,30 @@
         '.vkx-cfg{position:fixed;bottom:18px;left:18px;z-index:9998;font-size:11px;opacity:.5;cursor:pointer;',
         'background:var(--white,#fff);border:1px solid rgba(128,128,128,.3);border-radius:6px;padding:4px 8px}',
         '.vkx-cfg:hover{opacity:1}',
+        '.vkx-cfg2{left:auto;right:18px}',
+        '.vkx-lanes{padding:0 12px 40px}',
+        '.vkx-lane{margin-bottom:18px}',
+        '.vkx-lane-cab{display:flex;align-items:center;gap:7px;position:sticky;left:0;padding:7px 2px;',
+        'font-weight:600;font-size:13px}',
+        '.vkx-lane-cab .vkx-pin{width:10px;height:10px;border-radius:50%;flex:none;background:var(--grey-300,#c8c8c8)}',
+        '.vkx-lane-cab .vkx-n{font-weight:400;color:var(--grey-500,#8a8a8a);font-size:12px}',
+        '.vkx-lane-grid{display:grid;gap:10px;align-items:start}',
+        '.vkx-col{background:var(--grey-100,#f3f4f6);border-radius:6px;padding:7px;min-height:38px}',
+        '.vkx-col-tit{font-size:10px;text-transform:uppercase;letter-spacing:.4px;',
+        'color:var(--grey-500,#8a8a8a);font-weight:600;margin-bottom:6px;display:flex;align-items:center}',
+        '.vkx-chip{display:block;background:var(--white,#fff);border:1px solid rgba(128,128,128,.22);',
+        'border-radius:5px;padding:5px 7px;margin-bottom:5px;font-size:12px;color:inherit;',
+        'text-decoration:none;cursor:pointer;line-height:1.35}',
+        '.vkx-chip:last-child{margin-bottom:0}',
+        '.vkx-chip:hover{border-color:var(--primary,#1973ff)}',
+        '.vkx-chip .vkx-id{color:var(--grey-500,#8a8a8a);font-size:11px;margin-right:4px}',
+        '.vkx-chip.vkx-hecha{opacity:.55}',
+        '.vkx-chip.vkx-hecha .vkx-t{text-decoration:line-through}',
+        '.vkx-vacio{color:var(--grey-400,#b5b5b5);font-size:11px;padding:2px}',
+        '.vkx-nota{font-size:12px;color:var(--grey-500,#8a8a8a);padding:8px 14px;display:flex;gap:6px;align-items:center}',
+        '.kanban.vkx-oculto{display:none!important}',
+        '.vkx-menu{min-width:200px;max-height:70vh}',
+        '.vkx-menu b:not(:first-child){margin-top:4px;border-top:1px solid rgba(128,128,128,.18);padding-top:7px}',
         '.vkx-ico{vertical-align:-2px;margin-right:6px;flex:none}'
     ].join('');
     document.head.appendChild(css);
@@ -276,6 +301,82 @@
         }
     }
 
+    // ---------- 3. swimlanes: datos ----------
+    //
+    // Para agrupar por etiqueta hace falta saber, de cada tarea, sus etiquetas
+    // y en que columna esta. Las dos cosas vienen juntas en los buckets de la
+    // vista: /projects/{p}/views/{v}/buckets devuelve cada columna con sus
+    // tareas adentro, y cada tarea con sus labels. Es una sola llamada, el
+    // mismo endpoint que ya usa el MCP para resolver la columna de una tarea.
+    //
+    // Del DOM no se pueden sacar: las etiquetas se pintan como chips sin nada
+    // que las identifique, y las tareas que quedaron fuera del scroll de una
+    // columna directamente no estan en la pagina.
+
+    var tablero = null;        // { viewId, columnas: [...], etiquetas: [...] }
+    var cargaTablero = null;
+
+    function vistaActual() {
+        var m = location.pathname.match(/\/projects\/(\d+)\/(\d+)/);
+        return m ? { pid: parseInt(m[1], 10), vid: parseInt(m[2], 10) } : null;
+    }
+
+    async function cargarTablero() {
+        var v = vistaActual();
+        if (!v) return null;
+        if (cargaTablero) return cargaTablero;
+        cargaTablero = (async function () {
+            try {
+                var bs = await api('/projects/' + v.pid + '/views/' + v.vid + '/buckets?per_page=100');
+                if (!Array.isArray(bs)) return null;
+                var etiquetas = {};
+                var columnas = bs.map(function (b) {
+                    var tareas = (b.tasks || []).map(function (t) {
+                        var ls = t.labels || [];
+                        ls.forEach(function (l) { etiquetas[l.id] = { id: l.id, title: l.title, hex_color: l.hex_color }; });
+                        // Los assignees vienen en el mismo payload: se aprovecha
+                        // para que las tarjetas se pinten sin esperar la otra carga.
+                        if (t.assignees) asignados[t.id] = t.assignees.map(function (u) { return u.username; });
+                        return {
+                            id: t.id, title: t.title, identifier: t.identifier, done: !!t.done,
+                            prioridad: t.priority || 0,
+                            etiquetas: ls.map(function (l) { return l.id; })
+                        };
+                    });
+                    return { id: b.id, title: b.title, tareas: tareas };
+                });
+                var lista = Object.keys(etiquetas).map(function (k) { return etiquetas[k]; });
+                lista.sort(function (a, b) { return a.title.localeCompare(b.title); });
+                tablero = { pid: v.pid, viewId: v.vid, columnas: columnas, etiquetas: lista };
+                return tablero;
+            } catch (e) {
+                return null;   // se reintenta en el proximo ciclo
+            } finally {
+                cargaTablero = null;
+            }
+        })();
+        return cargaTablero;
+    }
+
+    // Las franjas: una por etiqueta usada, mas "sin etiqueta" al final. Una
+    // tarea con varias etiquetas aparece en todas las que le corresponden.
+    function franjas() {
+        if (!tablero) return [];
+        var f = tablero.etiquetas.map(function (l) {
+            return { clave: 'l' + l.id, titulo: l.title, color: l.hex_color, id: l.id };
+        });
+        f.push({ clave: 'sin', titulo: 'Sin etiqueta', color: null, id: null });
+        return f.filter(function (fr) {
+            return tablero.columnas.some(function (c) { return tareasDe(c, fr).length; });
+        });
+    }
+
+    function tareasDe(columna, franja) {
+        return columna.tareas.filter(function (t) {
+            return franja.id === null ? !t.etiquetas.length : t.etiquetas.indexOf(franja.id) > -1;
+        });
+    }
+
     // Icono circular de persona (el mismo que usa Linear para "asignar")
     var SVG_PERSONA = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">'
         + '<circle cx="8" cy="5.4" r="2.6" stroke="currentColor" stroke-width="1.5"/>'
@@ -299,6 +400,9 @@
         for (var i = 0; i < enlaces.length; i++) {
             var a = enlaces[i];
             if (a.closest('.vkx-pop')) continue;
+            // Los chips de las franjas tambien son enlaces a /tasks/: no
+            // llevan boton de asignar, son solo una referencia.
+            if (a.closest('.vkx-lanes')) continue;
             var m = a.getAttribute('href').match(/\/tasks\/(\d+)/);
             if (!m) continue;
             // La tarjeta tiene que ser el elemento propio de ESTA tarea. Si
@@ -471,8 +575,13 @@
         if (actual && pid && actual !== pid) return;
         // Un cambio propio de hace menos de 2s ya se ve en pantalla
         if (Date.now() - propio < 3000) return;
-        if (autoOn() && !ocupado()) { if (!refrescarSuave()) location.reload(); }
-        else mostrarAviso();
+        // Con las franjas prendidas el tablero que se ve es el propio, asi
+        // que hay que releerlo: refrescarSuave() solo recarga el de Vue, que
+        // esta escondido.
+        if (autoOn() && !ocupado()) {
+            if (lanesOn() && lanesCont) refrescarLanes();
+            else if (!refrescarSuave()) location.reload();
+        } else mostrarAviso();
     }
 
     function conectar() {
@@ -501,6 +610,292 @@
         reintentoMs = Math.min(reintentoMs * 2, 30000);
     }
 
+    // ---------- 3c. swimlanes: modo ----------
+
+    // Al reves que autoOn(): este arranca apagado, para que nadie se encuentre
+    // el tablero cambiado sin haberlo pedido.
+    function lanesOn() { return localStorage.getItem(PREF_LANES) === 'on'; }
+
+    // El modo solo tiene sentido en la vista kanban.
+    function hayKanban() { return !!document.querySelector('.kanban'); }
+
+    // ---------- 3d. swimlanes: pintado ----------
+    //
+    // El kanban de Vue se esconde y en su lugar va un tablero propio, en vez de
+    // mover o clonar sus nodos. Clonar una tarjeta da un nodo muerto: el
+    // drag&drop de Vikunja es SortableJS atado a ESE nodo y a su posicion en el
+    // store, asi que un clon no se arrastra, y si cae dentro de una lista
+    // arrastrable puede terminar moviendo otra tarea. Como una tarea con varias
+    // etiquetas tiene que aparecer en varias franjas, duplicar es inevitable y
+    // el arrastre no se puede sostener: se reemplaza por el menu del click
+    // derecho, que ademas llega a mas cosas que mover de columna.
+    //
+    // Nada de esto toca el DOM de Vue, asi que ningun re-render puede pisar lo
+    // pintado ni dejar el tablero a medias.
+
+    var lanesCont = null;
+
+    function quitarLanes() {
+        if (lanesCont) { lanesCont.remove(); lanesCont = null; }
+        var k = document.querySelector('.kanban');
+        if (k) k.classList.remove('vkx-oculto');
+    }
+
+    // El router de Vue solo intercepta sus propios links; un <a href> plano
+    // recargaria toda la app. Devuelve false si los internals no estan y el
+    // llamador deja pasar la navegacion normal.
+    function irA(ruta) {
+        try {
+            var raiz = document.querySelector('#app');
+            var app = raiz && raiz.__vue_app__;
+            var r = app && app.config.globalProperties.$router;
+            if (!r) return false;
+            r.push(ruta);
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function chip(t) {
+        var a = document.createElement('a');
+        a.className = 'vkx-chip' + (t.done ? ' vkx-hecha' : '');
+        a.href = '/tasks/' + t.id;
+        a.dataset.task = t.id;
+        if (t.identifier) {
+            var i = document.createElement('span');
+            i.className = 'vkx-id';
+            i.textContent = t.identifier;
+            a.appendChild(i);
+        }
+        var n = document.createElement('span');
+        n.className = 'vkx-t';
+        n.textContent = t.title;
+        a.appendChild(n);
+        a.addEventListener('click', function (ev) {
+            if (ev.button || ev.metaKey || ev.ctrlKey) return;
+            if (irA('/tasks/' + t.id)) ev.preventDefault();
+        });
+        return a;
+    }
+
+    function pintarLanes() {
+        if (!lanesOn() || !hayKanban()) { quitarLanes(); return; }
+        try {
+            if (!tablero) { cargarTablero().then(function (t) { if (t) todo(); }); return; }
+            var k = document.querySelector('.kanban');
+            var fs = franjas();
+
+            // Se repinta solo si cambio algo: el observer llama a todo() en cada
+            // rafaga de mutaciones, y reconstruir decenas de celdas cada vez se
+            // nota en la notebook donde corre esto.
+            var firma = fs.map(function (f) {
+                return f.clave + tablero.columnas.map(function (c) {
+                    return tareasDe(c, f).map(function (t) { return t.id + (t.done ? 'x' : ''); }).join(',');
+                }).join(';');
+            }).join('|');
+
+            if (!lanesCont) {
+                lanesCont = document.createElement('div');
+                lanesCont.className = 'vkx-lanes';
+                k.parentNode.insertBefore(lanesCont, k.nextSibling);
+            }
+            k.classList.add('vkx-oculto');
+            if (lanesCont.dataset.firma === firma) return;
+            lanesCont.dataset.firma = firma;
+            lanesCont.innerHTML = '';
+
+            var nota = document.createElement('div');
+            nota.className = 'vkx-nota';
+            nota.textContent = 'Agrupado por etiqueta: las tarjetas no se arrastran. Click derecho sobre una para moverla o cambiarla.';
+            lanesCont.appendChild(nota);
+
+            var anchos = 'repeat(' + tablero.columnas.length + ', minmax(150px, 1fr))';
+            fs.forEach(function (f) {
+                var lane = document.createElement('div');
+                lane.className = 'vkx-lane';
+                var cab = document.createElement('div');
+                cab.className = 'vkx-lane-cab';
+                var pin = document.createElement('span');
+                pin.className = 'vkx-pin';
+                if (f.color) pin.style.background = '#' + String(f.color).replace(/^#/, '');
+                cab.appendChild(pin);
+                cab.appendChild(document.createTextNode(f.titulo));
+                var n = document.createElement('span');
+                n.className = 'vkx-n';
+                n.textContent = tablero.columnas.reduce(function (a, c) { return a + tareasDe(c, f).length; }, 0);
+                cab.appendChild(n);
+                lane.appendChild(cab);
+
+                var grid = document.createElement('div');
+                grid.className = 'vkx-lane-grid';
+                grid.style.gridTemplateColumns = anchos;
+                tablero.columnas.forEach(function (c) {
+                    var col = document.createElement('div');
+                    col.className = 'vkx-col';
+                    var tit = document.createElement('div');
+                    tit.className = 'vkx-col-tit';
+                    // Reusa los iconos de estado que ya se pintan en las columnas.
+                    if (ICONOS[c.title]) tit.innerHTML = ICONOS[c.title];
+                    tit.appendChild(document.createTextNode(c.title));
+                    col.appendChild(tit);
+                    var ts = tareasDe(c, f);
+                    if (!ts.length) {
+                        var v = document.createElement('div');
+                        v.className = 'vkx-vacio';
+                        v.textContent = '--';
+                        col.appendChild(v);
+                    } else ts.forEach(function (t) { col.appendChild(chip(t)); });
+                    grid.appendChild(col);
+                });
+                lane.appendChild(grid);
+                lanesCont.appendChild(lane);
+            });
+        } catch (e) {
+            // Si algo no esta donde se esperaba se apaga la vista propia y
+            // vuelve el tablero de Vikunja, intacto.
+            quitarLanes();
+        }
+    }
+
+    // ---------- 3e. swimlanes: menu del click derecho ----------
+    //
+    // Reemplaza al arrastre, que en las franjas no se puede sostener (ver
+    // arriba). Va contra la API, asi que no depende de nada de Vue, y de paso
+    // llega a cosas que el drag&drop no hacia: prioridad, asignar, marcar
+    // hecha. El cambio se pinta al instante y se revierte si el server lo
+    // rechaza, igual que la asignacion rapida de las tarjetas.
+
+    var PRIORIDADES = ['Sin prioridad', 'Baja', 'Media', 'Alta', 'Urgente', 'DEFCON 1'];
+
+    function cerrarMenu() {
+        var m = document.querySelector('.vkx-menu');
+        if (m) m.remove();
+    }
+
+    // Relee el tablero y repinta. Se usa despues de cada cambio.
+    function refrescarLanes() {
+        tablero = null;
+        return cargarTablero().then(function () { todo(); });
+    }
+
+    function itemMenu(menu, texto, marcado, fn) {
+        var b = document.createElement('button');
+        var dot = document.createElement('span');
+        dot.className = 'vkx-dot' + (marcado ? ' vkx-yes' : '');
+        b.appendChild(dot);
+        b.appendChild(document.createTextNode(texto));
+        b.onclick = function (ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            cerrarMenu();
+            fn();
+        };
+        menu.appendChild(b);
+        return b;
+    }
+
+    function titMenu(menu, texto) {
+        var t = document.createElement('b');
+        t.textContent = texto;
+        menu.appendChild(t);
+    }
+
+    // Envuelve una escritura: marca el cambio como propio (para que el
+    // websocket no dispare una recarga encima), repinta y avisa si fallo.
+    function accion(promesa) {
+        marcarCambio();
+        promesa.then(function () {
+            marcarCambio();
+            refrescarLanes();
+        }).catch(function (e) {
+            alert('No se pudo: ' + e.message);
+            refrescarLanes();
+        });
+    }
+
+    function abrirMenu(x, y, tarea) {
+        cerrarMenu();
+        var menu = document.createElement('div');
+        menu.className = 'vkx-pop vkx-menu';
+        document.body.appendChild(menu);
+
+        titMenu(menu, (tarea.identifier || '#' + tarea.id));
+
+        // Mover de columna: lo que antes se hacia arrastrando.
+        titMenu(menu, 'Mover a');
+        tablero.columnas.forEach(function (c) {
+            var esta = c.tareas.some(function (t) { return t.id === tarea.id; });
+            itemMenu(menu, c.title, esta, function () {
+                if (esta) return;
+                accion(api('/projects/' + tablero.pid + '/views/' + tablero.viewId
+                    + '/buckets/' + c.id + '/tasks', 'POST', { task_id: tarea.id }));
+            });
+        });
+
+        titMenu(menu, 'Prioridad');
+        PRIORIDADES.forEach(function (nombre, i) {
+            itemMenu(menu, nombre, tarea.prioridad === i, function () {
+                // La API espera la tarea entera: se parte de la actual.
+                accion(api('/tasks/' + tarea.id).then(function (actual) {
+                    actual.priority = i;
+                    return api('/tasks/' + tarea.id, 'POST', actual);
+                }));
+            });
+        });
+
+        titMenu(menu, 'Estado');
+        itemMenu(menu, tarea.done ? 'Reabrir' : 'Marcar como hecha', false, function () {
+            accion(api('/tasks/' + tarea.id).then(function (actual) {
+                actual.done = !tarea.done;
+                return api('/tasks/' + tarea.id, 'POST', actual);
+            }));
+        });
+        itemMenu(menu, 'Abrir la tarea', false, function () {
+            if (!irA('/tasks/' + tarea.id)) location.href = '/tasks/' + tarea.id;
+        });
+
+        // Asignar: la gente del proyecto ya esta cacheada por la otra funcion.
+        usuariosDe(tablero.pid).then(function (users) {
+            if (!document.body.contains(menu)) return;
+            titMenu(menu, 'Asignar a');
+            var tiene = asignados[tarea.id] || [];
+            users.forEach(function (u) {
+                itemMenu(menu, u.name || u.username, tiene.indexOf(u.username) > -1, function () {
+                    var ya = (asignados[tarea.id] || []).indexOf(u.username) > -1;
+                    accion(ya
+                        ? api('/tasks/' + tarea.id + '/assignees/' + u.id, 'DELETE')
+                        : api('/tasks/' + tarea.id + '/assignees', 'PUT', { user_id: u.id }));
+                });
+            });
+            ubicarMenu(menu, x, y);
+        }).catch(function () { });
+
+        ubicarMenu(menu, x, y);
+    }
+
+    // Se ubica despues de llenarlo, para no salirse de la pantalla.
+    function ubicarMenu(menu, x, y) {
+        var alto = menu.offsetHeight || 260;
+        var ancho = menu.offsetWidth || 200;
+        menu.style.top = Math.max(8, Math.min(y, window.innerHeight - alto - 8)) + 'px';
+        menu.style.left = Math.max(8, Math.min(x, window.innerWidth - ancho - 8)) + 'px';
+    }
+
+    document.addEventListener('contextmenu', function (ev) {
+        var chip = ev.target.closest && ev.target.closest('.vkx-chip');
+        if (!chip || !tablero) return;
+        ev.preventDefault();
+        var id = parseInt(chip.dataset.task, 10);
+        var tarea = null;
+        tablero.columnas.forEach(function (c) {
+            c.tareas.forEach(function (t) { if (t.id === id) tarea = t; });
+        });
+        if (tarea) abrirMenu(ev.clientX, ev.clientY, tarea);
+    });
+
+    document.addEventListener('click', function (ev) {
+        if (!ev.target.closest('.vkx-menu')) cerrarMenu();
+    });
+
     // ---------- arranque ----------
 
     var cfg = document.createElement('div');
@@ -517,9 +912,23 @@
     };
     pintarCfg();
 
+    var cfgLanes = document.createElement('div');
+    cfgLanes.className = 'vkx-cfg vkx-cfg2';
+    function pintarCfgLanes() {
+        cfgLanes.textContent = '▤ agrupar por etiqueta: ' + (lanesOn() ? 'ON' : 'OFF');
+        cfgLanes.title = 'Agrupa las tareas del kanban en franjas por etiqueta';
+        cfgLanes.style.display = hayKanban() ? '' : 'none';
+    }
+    cfgLanes.onclick = function () {
+        localStorage.setItem(PREF_LANES, lanesOn() ? 'off' : 'on');
+        pintarCfgLanes();
+        todo();
+    };
+    pintarCfgLanes();
+
     var OPCIONES_OBS = { childList: true, subtree: true };
 
-    function todo() { decorar(); decorarColumnas(); }
+    function todo() { decorar(); decorarColumnas(); pintarLanes(); pintarCfgLanes(); }
 
     // Al cambiar de proyecto hay que releer los asignados
     var proyectoVisto = null;
@@ -535,6 +944,7 @@
 
     function arrancar() {
         document.body.appendChild(cfg);
+        document.body.appendChild(cfgLanes);
         // El observer se desconecta mientras redecora: lo que pinta extra.js son
         // cambios del DOM y volverian a dispararlo. El rAF junta la rafaga de
         // mutaciones de un re-render de Vue en una sola pasada.

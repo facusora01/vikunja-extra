@@ -31,7 +31,8 @@ Vikunja 127.0.0.1:3456 ──► PostgreSQL 16
 
 | Ruta | Qué es |
 |---|---|
-| `frontend/extra.js` | Script inyectado: asignación rápida, avatares en la tarjeta, íconos de estado por columna, cliente websocket |
+| `frontend/extra.js` | Script inyectado: asignación rápida, avatares en la tarjeta, íconos de estado por columna, agrupado por etiqueta en el Kanban, cliente websocket |
+| `frontend/verificar-swimlanes.js` | Se pega en la consola del navegador para comprobar que el agrupado por etiqueta tiene lo que necesita (no se despliega) |
 | `server/eventos.js` | Servicio que escucha Postgres y empuja los cambios por websocket |
 | `install/install-vikunja.sh` | Instala Vikunja sobre el PostgreSQL existente, con systemd y backup diario |
 | `install/install-extra.sh` | Pone nginx delante e inyecta `extra.js` |
@@ -150,6 +151,17 @@ sudo bash install/install-extra.sh
   la UI y se veían como un reload. Ese `location` tampoco limpia
   `Accept-Encoding` —`sub_filter` solo trabaja sobre HTML—, con lo que volvió el
   gzip: el bundle principal pasó de 315 KB a 108 KB.
+- **Agrupar por etiqueta esconde el kanban de Vue y pinta uno propio.** Es la
+  única forma de que una tarea con varias etiquetas aparezca en varias franjas:
+  hay que dibujarla más de una vez. Mover o clonar los nodos de Vikunja no
+  sirve — su drag & drop es SortableJS atado a *ese* nodo y a su posición en el
+  store, así que un clon no se arrastra y, si queda dentro de una lista
+  arrastrable, puede terminar moviendo otra tarea. La contra es que en modo
+  agrupado no se arrastra nada; lo reemplaza el menú del click derecho, que va
+  contra la API y llega a más cosas (columna, prioridad, hecha, asignar). El
+  modo arranca **apagado** y no toca el DOM de Vue, así que ningún re-render
+  puede pisarlo, y si algo falla se borra lo propio y vuelve el tablero
+  original.
 - **El registro público está deshabilitado** a propósito: la instancia es
   accesible desde internet. Las cuentas se crean por CLI.
 - Por el websocket viaja únicamente *"cambió algo en el proyecto N"*, nunca
@@ -168,6 +180,12 @@ Descubrirlos costó varias iteraciones. Antes de tocar `extra.js`, tenerlos a ma
 - **Nada propio debe ir en `position:absolute`**: la barra "+ ADD ANOTHER TASK"
   tapa las tarjetas de abajo, y un elemento absoluto se dibuja por encima de
   ella, quedando visible la foto de una tarjeta fuera de pantalla.
+- Las etiquetas de una tarea **no se pueden leer del DOM**: se pintan como chips
+  sin nada que las identifique, y las tareas que quedaron fuera del scroll de una
+  columna ni siquiera están en la página. Salen de
+  `/projects/{p}/views/{v}/buckets`, que devuelve cada columna con sus tareas
+  adentro y cada tarea con sus `labels`, `assignees` y `priority`: una sola
+  llamada da todo lo que el agrupado necesita.
 - El markup viene en chunks separados, así que las clases no aparecen en el CSS
   de la página inicial. Ante la duda, medir en el navegador en vez de suponer.
 
