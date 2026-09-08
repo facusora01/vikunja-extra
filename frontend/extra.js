@@ -15,6 +15,7 @@
 
     var PREF = 'vkextra:autorefresh';
     var PREF_LANES = 'vkextra:swimlanes';
+    var PREF_PLEGADAS = 'vkextra:swimlanes-plegadas';
 
     // ---------- utilidades ----------
 
@@ -95,6 +96,9 @@
         '.vkx-lane{margin-bottom:18px}',
         '.vkx-lane-cab{display:flex;align-items:center;gap:7px;position:sticky;left:0;padding:7px 2px;',
         'font-weight:600;font-size:13px}',
+        '.vkx-lane-cab{cursor:pointer;user-select:none;border-radius:5px}',
+        '.vkx-lane-cab:hover{background:rgba(128,128,128,.1)}',
+        '.vkx-flecha{display:flex;align-items:center;color:var(--grey-500,#8a8a8a);flex:none}',
         '.vkx-lane-cab .vkx-pin{width:10px;height:10px;border-radius:50%;flex:none;background:var(--grey-300,#c8c8c8)}',
         '.vkx-lane-cab .vkx-n{font-weight:400;color:var(--grey-500,#8a8a8a);font-size:12px}',
         '.vkx-lane-grid{display:grid;gap:10px;align-items:start}',
@@ -304,10 +308,13 @@
     // ---------- 3. swimlanes: datos ----------
     //
     // Para agrupar por etiqueta hace falta saber, de cada tarea, sus etiquetas
-    // y en que columna esta. Las dos cosas vienen juntas en los buckets de la
-    // vista: /projects/{p}/views/{v}/buckets devuelve cada columna con sus
-    // tareas adentro, y cada tarea con sus labels. Es una sola llamada, el
-    // mismo endpoint que ya usa el MCP para resolver la columna de una tarea.
+    // y en que columna esta. Las dos cosas vienen juntas en
+    // /projects/{p}/views/{v}/tasks, que devuelve cada columna con sus tareas
+    // adentro y cada tarea con labels, assignees y priority: una sola llamada.
+    //
+    // Ojo con el endpoint: /views/{v}/buckets, que suena al indicado y es el
+    // que usa el MCP, devuelve solo la metadata de las columnas — sin campo
+    // tasks. El que las trae es este.
     //
     // Del DOM no se pueden sacar: las etiquetas se pintan como chips sin nada
     // que las identifique, y las tareas que quedaron fuera del scroll de una
@@ -327,7 +334,7 @@
         if (cargaTablero) return cargaTablero;
         cargaTablero = (async function () {
             try {
-                var bs = await api('/projects/' + v.pid + '/views/' + v.vid + '/buckets?per_page=100');
+                var bs = await api('/projects/' + v.pid + '/views/' + v.vid + '/tasks?per_page=100');
                 if (!Array.isArray(bs)) return null;
                 var etiquetas = {};
                 var columnas = bs.map(function (b) {
@@ -635,6 +642,29 @@
 
     var lanesCont = null;
 
+    // Con muchas etiquetas la vista se hace larga (en un proyecto real dan 13
+    // franjas por 6 columnas). Las que tienen pocas tareas arrancan plegadas:
+    // se ve el conteo y se abren con un click. Lo que cada uno abre o cierra se
+    // recuerda, y una vez tocada manda la eleccion de la persona.
+    var MINIMO_ABIERTA = 3;
+
+    function plegadas() {
+        try { return JSON.parse(localStorage.getItem(PREF_PLEGADAS) || '{}'); }
+        catch (e) { return {}; }
+    }
+
+    function estaPlegada(clave, total) {
+        var p = plegadas();
+        if (clave in p) return p[clave];
+        return total < MINIMO_ABIERTA;
+    }
+
+    function plegar(clave, valor) {
+        var p = plegadas();
+        p[clave] = valor;
+        try { localStorage.setItem(PREF_PLEGADAS, JSON.stringify(p)); } catch (e) { }
+    }
+
     function quitarLanes() {
         if (lanesCont) { lanesCont.remove(); lanesCont = null; }
         var k = document.querySelector('.kanban');
@@ -653,6 +683,15 @@
             r.push(ruta);
             return true;
         } catch (e) { return false; }
+    }
+
+    function flecha(cerrada) {
+        var s = document.createElement('span');
+        s.className = 'vkx-flecha';
+        s.innerHTML = '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true">'
+            + '<path d="' + (cerrada ? 'M3 1 L8 5 L3 9' : 'M1 3 L5 8 L9 3')
+            + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        return s;
     }
 
     function chip(t) {
@@ -688,7 +727,7 @@
             // rafaga de mutaciones, y reconstruir decenas de celdas cada vez se
             // nota en la notebook donde corre esto.
             var firma = fs.map(function (f) {
-                return f.clave + tablero.columnas.map(function (c) {
+                return f.clave + JSON.stringify(plegadas()[f.clave]) + tablero.columnas.map(function (c) {
                     return tareasDe(c, f).map(function (t) { return t.id + (t.done ? 'x' : ''); }).join(',');
                 }).join(';');
             }).join('|');
@@ -721,9 +760,19 @@
                 cab.appendChild(document.createTextNode(f.titulo));
                 var n = document.createElement('span');
                 n.className = 'vkx-n';
-                n.textContent = tablero.columnas.reduce(function (a, c) { return a + tareasDe(c, f).length; }, 0);
+                var total = tablero.columnas.reduce(function (a, c) { return a + tareasDe(c, f).length; }, 0);
+                n.textContent = total;
                 cab.appendChild(n);
+
+                var cerrada = estaPlegada(f.clave, total);
+                cab.insertBefore(flecha(cerrada), cab.firstChild);
+                cab.title = cerrada ? 'Mostrar las tareas' : 'Plegar esta franja';
+                cab.onclick = function () {
+                    plegar(f.clave, !cerrada);
+                    todo();
+                };
                 lane.appendChild(cab);
+                if (cerrada) { lanesCont.appendChild(lane); return; }
 
                 var grid = document.createElement('div');
                 grid.className = 'vkx-lane-grid';
